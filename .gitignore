@@ -1,0 +1,8 @@
+# Build output
+/build/
+/target/
+/ui-qt/bridge/target/
+
+# Local tooling and scratch work
+.claude/
+qt-table-spike/

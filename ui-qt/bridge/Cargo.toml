@@ -1,0 +1,15 @@
+[package]
+name = "kern-qt-bridge"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# This small bridge builds independently of the core workspace and compiles
+# the same table source used by kern-core.
+[workspace]
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+serde_json = "1"

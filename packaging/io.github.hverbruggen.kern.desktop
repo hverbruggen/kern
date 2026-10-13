@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=kern
+GenericName=Text Editor
+Comment=Lightweight editor for Markdown, LaTeX, and plain text
+Exec=kern %F
+Icon=io.github.hverbruggen.kern
+Terminal=false
+Categories=Utility;TextEditor;
+MimeType=text/plain;text/markdown;text/x-tex;
+Keywords=markdown;latex;text;editor;
+StartupNotify=true
+StartupWMClass=io.github.hverbruggen.kern
