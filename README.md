@@ -135,4 +135,5 @@ display`
 MIT. See `LICENSE`. 
 
 The application icon's lowercase "k" is derived from the "Great Vibes" typeface
-by TypeSETit, used under the SIL Open Font License 1.1.
+by TypeSETit, used under the SIL Open Font License 1.1. The toolbar icons are a
+subset of JetBrainsMono Nerd Font, also under the OFL; see `ui-qt/fonts/`.

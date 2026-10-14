@@ -5,6 +5,7 @@
 #endif
 
 #include <QFileInfo>
+#include <QFontDatabase>
 #include <QGuiApplication>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -55,6 +56,8 @@ int main(int argc, char **argv)
 {
     QQuickStyle::setStyle(QStringLiteral("Basic"));
     QGuiApplication app(argc, argv);
+    // Toolbar icons come from a bundled subset so they render whatever font the theme picks.
+    QFontDatabase::addApplicationFont(QStringLiteral(":/qt/kern-icons.ttf"));
     app.setApplicationName(QStringLiteral("kern"));
     app.setApplicationVersion(QStringLiteral("0.1.0"));
     // Matches the desktop file name, so the window manager can pair windows with the launcher entry.

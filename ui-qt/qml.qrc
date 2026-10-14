@@ -1,5 +1,6 @@
 <RCC>
   <qresource prefix="/qt">
     <file>main.qml</file>
+    <file alias="kern-icons.ttf">fonts/kern-icons.ttf</file>
   </qresource>
 </RCC>

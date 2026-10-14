@@ -732,7 +732,7 @@ ApplicationWindow {
         ToolTip.delay: 400
         contentItem: RowLayout {
             spacing: 3
-            Label { text: ribbonButton.glyph; visible: text.length > 0; font.family: uiTheme.monoFont; font.pixelSize: 15; color: ribbonButton.enabled ? uiTheme.accent : uiTheme.muted; opacity: ribbonButton.enabled ? 1 : 0.45 }
+            Label { text: ribbonButton.glyph; visible: text.length > 0; font.family: "Kern Icons"; font.pixelSize: 15; color: ribbonButton.enabled ? uiTheme.accent : uiTheme.muted; opacity: ribbonButton.enabled ? 1 : 0.45 }
             Label { text: ribbonButton.text; visible: text.length > 0; font.pixelSize: 11; color: ribbonButton.enabled ? uiTheme.foreground : uiTheme.muted }
         }
         background: Rectangle {
