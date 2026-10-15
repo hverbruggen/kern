@@ -63,6 +63,25 @@ QString markdownFromRichHtml(const QString &html)
     return htmlguard::unescapeCode(formatted.toMarkdown(QTextDocument::MarkdownDialectGitHub));
 }
 
+// Markdown cannot hold an empty paragraph, so empty paragraphs at the very end of the last block
+// are kept as extra blank lines after the final text: one blank line per empty paragraph.
+int trailingEmptyParagraphs(const QString &html)
+{
+    static const QRegularExpression tail(QStringLiteral(
+        R"((?:<p\b[^>]*-qt-paragraph-type:empty[^>]*>\s*<br\s*/?>\s*</p>\s*)+(?=</body>))"));
+    const auto match = tail.match(html);
+    if (!match.hasMatch())
+        return 0;
+    static const QRegularExpression paragraph(QStringLiteral(R"(<p\b)"));
+    qsizetype count = 0;
+    auto all = paragraph.globalMatch(match.captured());
+    while (all.hasNext()) {
+        all.next();
+        ++count;
+    }
+    return int(qMin<qsizetype>(count, 50));
+}
+
 QJsonArray tablesFor(const QByteArray &source)
 {
     return QJsonDocument::fromJson(takeRustString(kern_tables_json(source.constData()))).array();
@@ -222,7 +241,7 @@ QString mergeEditedMarkdown(const QString &original, const QString &edited)
     qsizetype lastChanged = baseline.size() - suffix > 0 ? ownerOf(baseline.size() - suffix - 1) : -1;
     if (lastChanged < firstChanged)
         lastChanged = firstChanged - 1;
-    const qsizetype editedFrom = firstChanged < originalChunks.size() ? firstBaseline[firstChanged] : editedChunks.size();
+    const qsizetype editedFrom = firstChanged < originalChunks.size() ? firstBaseline[firstChanged] : firstBaseline.last();
     const qsizetype editedTo = editedChunks.size() - (baseline.size() - firstBaseline[lastChanged + 1]);
     if (editedFrom > editedTo || editedTo > editedChunks.size())
         return htmlguard::restore(edited, tags);
@@ -418,9 +437,16 @@ void Controller::rebuildBlocks()
     auto appendText = [this, &source, latex](qsizetype start, qsizetype end) {
         const QString text = QString::fromUtf8(source.mid(start, end - start));
         m_sourceBlocks.push_back({start, end, -1});
+        int trailingBlank = 0;
+        if (!latex && end == source.size() && !text.trimmed().isEmpty()) {
+            while (trailingBlank < text.size() && text[text.size() - trailingBlank - 1] == QLatin1Char('\n'))
+                ++trailingBlank;
+            trailingBlank = qBound(0, trailingBlank - 1, 50);
+        }
         m_blocks.push_back(QVariantMap{{"kind", "text"}, {"text", text},
                                        {"preview", latex ? latexPreview(text) : text},
-                                       {"previewFormat", latex ? "rich" : "source"}});
+                                       {"previewFormat", latex ? "rich" : "source"},
+                                       {"trailingBlank", trailingBlank}});
     };
     qsizetype offset = 0;
     for (int index = 0; index < tables.size(); ++index) {
@@ -771,6 +797,10 @@ void Controller::editFormattedBlock(int block, const QString &html)
         for (qsizetype i = item.start; i > 0 && document->source[i - 1] == '\n'; --i)
             ++precedingNewlines;
         leadingNewlines = qMax(0, 2 - precedingNewlines);
+    }
+    if (block == m_sourceBlocks.size() - 1 && !replacement.isEmpty()) {
+        const int emptyAtEnd = trailingEmptyParagraphs(html);
+        trailingNewlines = emptyAtEnd > 0 ? emptyAtEnd + 1 : qMin(trailingNewlines, 1);
     }
     replacement.prepend(QString(leadingNewlines, QLatin1Char('\n')));
     replacement += QString(trailingNewlines, QLatin1Char('\n'));

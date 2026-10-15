@@ -60,6 +60,9 @@ ApplicationWindow {
     property int selectedTable: -1
     property int pendingCloseTab: -1
     property var activeEditor: null
+    // True while text typed in the visible editor has not reached the document yet.
+    readonly property bool pendingEdit: (activeEditor !== null && activeEditor.contentDirty === true)
+        || (sourceMode && sourceArea.text !== controller.sourceText)
     property int insertBlock: -1
     property int insertCursor: 0
     property bool insertVisualCursor: false
@@ -199,10 +202,40 @@ ApplicationWindow {
         })
     }
 
-    function commitActive() {
-        if (activeEditor && activeEditor.commit)
-            activeEditor.commit()
+    // keepFocus is for commits that happen while the user keeps typing, such as Save. Committing
+    // rebuilds the blocks, so the caret is put back where it was.
+    // Blank lines at the end of a document show as empty paragraphs, so Enter at the end sticks.
+    function withTrailingParagraphs(html, count) {
+        if (!count) return html
+        const empty = '<p style="-qt-paragraph-type:empty; margin-top:0px; margin-bottom:0px; margin-left:0px; margin-right:0px; -qt-block-indent:0; text-indent:0px;"><br /></p>'
+        const at = html.lastIndexOf("</body>")
+        return at < 0 ? html : html.slice(0, at) + empty.repeat(count) + html.slice(at)
+    }
+
+    function commitActive() { commitEdits(false) }
+
+    function commitEdits(keepFocus) {
+        const editor = activeEditor
+        let restore = null
+        if (keepFocus === true && editor && editor.contentDirty && editor.activeFocus) {
+            if (editor.sourceBlockIndex !== undefined)
+                restore = { block: editor.sourceBlockIndex, caret: editor.cursorPosition }
+            else if (editor.tableIndex !== undefined)
+                restore = { table: editor.tableIndex, row: editor.rowIndex, col: editor.columnIndex }
+        }
+        if (editor && editor.commit)
+            editor.commit()
         activeEditor = null
+        if (restore) {
+            if (restore.table !== undefined) queueTableCellFocus(restore.table, restore.row, restore.col)
+            else Qt.callLater(() => {
+                const loader = blockRepeater.itemAt(restore.block)
+                const target = loader && loader.item ? loader.item.editor : null
+                if (!target) return
+                target.cursorPosition = Math.min(restore.caret, target.length)
+                target.forceActiveFocus()
+            })
+        }
         if (sourceMode && sourceArea.text !== controller.sourceText)
             controller.setSourceText(sourceArea.text)
     }
@@ -323,7 +356,7 @@ ApplicationWindow {
     }
 
     function saveCurrent() {
-        commitActive()
+        commitEdits(true)
         if (!controller.hasDocument) return
         if (controller.currentHasPath) controller.save()
         else saveDialog.open()
@@ -940,6 +973,7 @@ ApplicationWindow {
             showFiles: picker.showFiles
             showDirsFirst: true
             sortField: FolderListModel.Name
+            sortCaseSensitive: false
             nameFilters: {
                 const filters = []
                 for (const suffix of picker.suffixes)
@@ -1471,6 +1505,13 @@ ApplicationWindow {
                         enabled: !modelData.info
                         highlighted: !modelData.directory && modelData.path === root.currentDocumentPath
                         text: (modelData.directory ? (modelData.expanded ? "\uf07c " : "\uf07b ") : "\uf15b ") + modelData.name
+                        contentItem: Text {
+                            text: parent.text
+                            font: parent.font
+                            color: parent.enabled ? uiTheme.foreground : uiTheme.muted
+                            elide: Text.ElideRight
+                            verticalAlignment: Text.AlignVCenter
+                        }
                         background: Rectangle {
                             color: fileList.inSelection(index) ? Qt.alpha(uiTheme.accent, 0.28)
                                 : parent.highlighted ? Qt.alpha(uiTheme.accent, 0.14)
@@ -1524,7 +1565,7 @@ ApplicationWindow {
                             ToolButton {
                                 id: fileTab
                                 objectName: "document-tab-" + index
-                                text: (modelData.dirty ? "• " : "") + modelData.name
+                                text: (modelData.dirty || (modelData.active && root.pendingEdit) ? "• " : "") + modelData.name
                                 focusPolicy: Qt.NoFocus
                                 topPadding: 3
                                 bottomPadding: 3
@@ -1764,8 +1805,10 @@ ApplicationWindow {
                 property bool explicitTypingStyle: false
                 property bool contentDirty: false
                 property string originalText: textBlock.blockData
-                    ? controller.markdown ? uiTheme.markdownHtml(textBlock.blockData.preview, uiTheme.accent,
-                                                                 uiTheme.monoFont, uiTheme.zoomPercent)
+                    ? controller.markdown ? root.withTrailingParagraphs(
+                            uiTheme.markdownHtml(textBlock.blockData.preview, uiTheme.accent,
+                                                 uiTheme.monoFont, uiTheme.zoomPercent),
+                            textBlock.blockData.trailingBlank)
                         : textBlock.blockData.preview : ""
                 width: parent.width
                 text: originalText
@@ -1789,6 +1832,8 @@ ApplicationWindow {
                     if (!event.accepted) root.handleStyledKey(visualEditor, event)
                 }
                 onTextEdited: contentDirty = true
+                // Whatever holds unsaved text is the editor to commit, even after an earlier commit cleared it.
+                onContentDirtyChanged: if (contentDirty) root.activeEditor = visualEditor
                 function commit() {
                     if (!textBlock.blockData || !contentDirty) return
                     contentDirty = false
@@ -1804,7 +1849,7 @@ ApplicationWindow {
                         explicitTypingStyle = false
                         typingBold = false
                         typingItalic = false
-                        if (root.activeEditor === this) commit()
+                        commit()
                     }
                 }
             }
@@ -1936,6 +1981,7 @@ ApplicationWindow {
                                 onLinkHovered: link => root.offerLink(cellEditor, link)
                                 onLinkActivated: link => root.offerLink(cellEditor, link)
                                 onTextEdited: contentDirty = true
+                                onContentDirtyChanged: if (contentDirty) root.activeEditor = cellEditor
 
                                 function commit() {
                                     if (root.activeEditor === this) root.activeEditor = null
@@ -1968,7 +2014,7 @@ ApplicationWindow {
                                         explicitTypingStyle = false
                                         typingBold = false
                                         typingItalic = false
-                                        if (root.activeEditor === this) commit()
+                                        commit()
                                     }
                                 }
                                 Keys.onTabPressed: event => {

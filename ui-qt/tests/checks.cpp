@@ -4,6 +4,7 @@
 
 #include <QGuiApplication>
 #include <QClipboard>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QFile>
 #include <QFont>
@@ -245,6 +246,40 @@ int runSelfTest()
                 project.activateProjectEntry(i);
         const QVariantMap last = project.projectFiles().last().toMap();
         if (!last.value(QStringLiteral("info")).toBool()) return 76;
+    }
+
+    // Project tree: files added on disk show up without any user action, in the root and in an expanded folder.
+    {
+        QTemporaryDir live;
+        if (!live.isValid()) return 77;
+        QDir(live.path()).mkpath(QStringLiteral("sub"));
+        Controller project;
+        project.setProjectFolder(live.path());
+        const auto listed = [&project](const QString &name) {
+            for (const QVariant &entry : project.projectFiles())
+                if (entry.toMap().value(QStringLiteral("name")).toString() == name) return true;
+            return false;
+        };
+        const auto waitFor = [&](const QString &name) {
+            QElapsedTimer clock;
+            clock.start();
+            while (!listed(name) && clock.elapsed() < 1000)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+            return listed(name);
+        };
+        for (int i = 0; i < project.projectFiles().size(); ++i)
+            if (project.projectFiles()[i].toMap().value(QStringLiteral("name")).toString() == QStringLiteral("sub")) {
+                project.activateProjectEntry(i);
+                break;
+            }
+        QFile rootFile(live.filePath(QStringLiteral("new-root.md")));
+        if (!rootFile.open(QIODevice::WriteOnly)) return 78;
+        rootFile.close();
+        if (!waitFor(QStringLiteral("new-root.md"))) return 79;
+        QFile subFile(live.filePath(QStringLiteral("sub/new-sub.md")));
+        if (!subFile.open(QIODevice::WriteOnly)) return 80;
+        subFile.close();
+        if (!waitFor(QStringLiteral("new-sub.md"))) return 81;
     }
 
     for (const QString &name : {QStringLiteral("formatting.md"), QStringLiteral("escaped.md")}) {
@@ -995,6 +1030,15 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
         settle();
         QQuickItem *files = findVisual(window->contentItem(), QStringLiteral("project-list"));
         if (!files || !files->hasActiveFocus() || files->property("currentIndex").toInt() != 0) return 313;
+        {
+            // A file created on disk appears in the visible list within the settle time.
+            const int before = files->property("count").toInt();
+            QFile added(tree.filePath(QStringLiteral("zz-added.md")));
+            if (!added.open(QIODevice::WriteOnly)) return 330;
+            added.close();
+            settle();
+            if (files->property("count").toInt() != before + 1) return 331;
+        }
         press(Qt::Key_Down);
         if (files->property("currentIndex").toInt() != 1) return 314;
         press(Qt::Key_Down, Qt::ShiftModifier);
@@ -1328,6 +1372,89 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
             if (dimensions() != QPair<int, int>(4, 5) || !focused(1, 2)) { app.exit(177); return; }
             key(Qt::Key_Left, Qt::ControlModifier | Qt::AltModifier | Qt::ShiftModifier);
             app.exit(dimensions() == QPair<int, int>(4, 4) && focused(1, 1) ? 0 : 178);
+        });
+        return app.exec();
+    }
+    if (arguments.contains(QStringLiteral("--pending-edit-check"))) {
+        QTimer::singleShot(500, &app, [&app, &engine, &controller] {
+            auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+            QObject *root = engine.rootObjects().first();
+            if (!window) { app.exit(340); return; }
+            auto settle = [] { QEventLoop wait; QTimer::singleShot(150, &wait, &QEventLoop::quit); wait.exec(); };
+            auto type = [&](const QString &text) {
+                for (const QChar &c : text) {
+                    QKeyEvent down(QEvent::KeyPress, 0, Qt::NoModifier, QString(c));
+                    QCoreApplication::sendEvent(window, &down);
+                    QKeyEvent up(QEvent::KeyRelease, 0, Qt::NoModifier, QString(c));
+                    QCoreApplication::sendEvent(window, &up);
+                }
+                settle();
+            };
+            auto tabDirty = [&controller](int index) {
+                const QVariantList tabs = controller.tabs();
+                return index < tabs.size() && tabs[index].toMap().value(QStringLiteral("dirty")).toBool();
+            };
+            window->requestActivate();
+            QQuickItem *editor = findVisual(window->contentItem(), QStringLiteral("formatted-editor-0"));
+            if (!editor) { app.exit(341); return; }
+            editor->forceActiveFocus();
+            editor->setProperty("cursorPosition", editor->property("length").toInt());
+            type(QStringLiteral(" first-words"));
+            // Saving or undoing commits while the editor keeps focus; later typing must still be kept.
+            QMetaObject::invokeMethod(root, "commitEdits", Q_ARG(QVariant, true));
+            settle();
+            if (!controller.sourceText().contains(QStringLiteral("first-words"))) { app.exit(342); return; }
+            {
+                QQuickItem *again = findVisual(window->contentItem(), QStringLiteral("formatted-editor-0"));
+                if (!again || !again->hasActiveFocus()) { app.exit(347); return; }
+            }
+            type(QStringLiteral(" unfinished-sentence"));
+            if (!root->property("pendingEdit").toBool()) { app.exit(343); return; }
+            // Switching tabs the way a tab click does must keep the half-written text.
+            QMetaObject::invokeMethod(root, "commitActive");
+            if (!controller.sourceText().contains(QStringLiteral("unfinished-sentence"))) { app.exit(344); return; }
+            if (!tabDirty(0)) { app.exit(345); return; }
+            controller.newDocument();
+            settle();
+            controller.selectTab(0);
+            settle();
+            if (!controller.sourceText().simplified().contains(QStringLiteral("first-words unfinished-sentence"))) { app.exit(346); return; }
+            // A new blank document: a sentence typed without pressing Enter survives a tab switch.
+            controller.newDocument();
+            settle();
+            QMetaObject::invokeMethod(root, "focusDocument");
+            settle();
+            type(QStringLiteral("half a sentence"));
+            if (!root->property("pendingEdit").toBool()) { app.exit(348); return; }
+            QMetaObject::invokeMethod(root, "commitActive");
+            controller.selectTab(0);
+            settle();
+            controller.selectTab(controller.tabs().size() - 1);
+            settle();
+            if (!controller.sourceText().contains(QStringLiteral("half a sentence"))) { app.exit(349); return; }
+            // Enter at the end of the text, then Save: the new empty line stays and typing continues on it.
+            controller.newDocument();
+            settle();
+            QMetaObject::invokeMethod(root, "focusDocument");
+            settle();
+            type(QStringLiteral("Hello world"));
+            {
+                QKeyEvent down(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier, QStringLiteral("\r"));
+                QCoreApplication::sendEvent(window, &down);
+                QKeyEvent up(QEvent::KeyRelease, Qt::Key_Return, Qt::NoModifier, QStringLiteral("\r"));
+                QCoreApplication::sendEvent(window, &up);
+            }
+            settle();
+            QMetaObject::invokeMethod(root, "commitEdits", Q_ARG(QVariant, true));
+            settle();
+            if (controller.sourceText() != QStringLiteral("Hello world\n\n")) { app.exit(350); return; }
+            QQuickItem *blank = findVisual(window->contentItem(), QStringLiteral("formatted-editor-0"));
+            if (!blank || !blank->hasActiveFocus() || blank->property("cursorPosition").toInt() != blank->property("length").toInt()
+                || blank->property("length").toInt() != 12) { app.exit(351); return; }
+            type(QStringLiteral("next"));
+            QMetaObject::invokeMethod(root, "commitActive");
+            if (!controller.sourceText().simplified().contains(QStringLiteral("Hello world next"))) { app.exit(352); return; }
+            app.exit(0);
         });
         return app.exec();
     }
