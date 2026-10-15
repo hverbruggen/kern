@@ -68,6 +68,9 @@ int main(int argc, char **argv)
         return runSelfTest();
 #endif
     Controller controller;
+#ifndef KERN_WITH_CHECKS
+    controller.setRememberFolders(true);
+#endif
     UiTheme theme;
     bool openedFile = false;
     bool openedFolder = false;

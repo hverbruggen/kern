@@ -6,6 +6,7 @@
 #include <QClipboard>
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QSettings>
 #include <QFile>
 #include <QFont>
 #include <QQmlApplicationEngine>
@@ -1454,6 +1455,56 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
             type(QStringLiteral("next"));
             QMetaObject::invokeMethod(root, "commitActive");
             if (!controller.sourceText().simplified().contains(QStringLiteral("Hello world next"))) { app.exit(352); return; }
+            app.exit(0);
+        });
+        return app.exec();
+    }
+    if (arguments.contains(QStringLiteral("--recent-check"))) {
+        QTimer::singleShot(500, &app, [&app, &engine, &controller] {
+            auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+            QObject *root = engine.rootObjects().first();
+            QTemporaryDir settings, tree;
+            if (!window || !settings.isValid() || !tree.isValid()) { app.exit(360); return; }
+            QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, settings.path());
+            controller.setRememberFolders(true);
+            auto settle = [] { QEventLoop wait; QTimer::singleShot(100, &wait, &QEventLoop::quit); wait.exec(); };
+            QStringList made;
+            for (int i = 0; i < 12; ++i) {
+                const QString dir = tree.filePath(QStringLiteral("project-%1").arg(i));
+                QDir().mkpath(dir);
+                made.push_back(QFileInfo(dir).canonicalFilePath());
+                controller.setProjectFolder(dir);
+            }
+            QStringList recent = controller.recentFolders();
+            if (recent.size() != 10 || recent.first() != made.last() || recent.last() != made[2]) { app.exit(361); return; }
+            controller.setProjectFolder(made[5]);
+            if (controller.recentFolders().first() != made[5] || controller.recentFolders().size() != 10) { app.exit(362); return; }
+            // A fresh controller reads the saved list back.
+            {
+                Controller later;
+                later.setRememberFolders(true);
+                if (later.recentFolders() != controller.recentFolders()) { app.exit(363); return; }
+            }
+            // Folders that no longer exist drop out of the list.
+            QDir(made[11]).removeRecursively();
+            if (controller.recentFolders().contains(made[11])) { app.exit(364); return; }
+            // The ribbon button opens a menu; choosing an entry reopens that folder.
+            window->requestActivate();
+            settle();
+            QQuickItem *button = findVisual(window->contentItem(), QStringLiteral("recent-folders-button"));
+            if (!button || !button->isEnabled()) { app.exit(365); return; }
+            QMetaObject::invokeMethod(button, "clicked");
+            settle();
+            QObject *menu = root->findChild<QObject *>(QStringLiteral("recent-folders-menu"));
+            if (!menu || !menu->property("visible").toBool()) { app.exit(366); return; }
+            if (findVisual(window->contentItem(), QStringLiteral("recent-folder-9"))) { app.exit(369); return; }
+            QQuickItem *entry = findVisual(window->contentItem(), QStringLiteral("recent-folder-3"));
+            if (!entry) entry = menu->findChild<QQuickItem *>(QStringLiteral("recent-folder-3"));
+            if (!entry) { app.exit(367); return; }
+            const QString wanted = entry->property("folderPath").toString();
+            QMetaObject::invokeMethod(entry, "triggered");
+            settle();
+            if (controller.projectFolder() != wanted || controller.recentFolders().first() != wanted) { app.exit(368); return; }
             app.exit(0);
         });
         return app.exec();

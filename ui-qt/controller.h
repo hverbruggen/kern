@@ -41,6 +41,8 @@ class Controller : public QObject {
     Q_PROPERTY(QVariantList tabs READ tabs NOTIFY tabsChanged)
     Q_PROPERTY(QVariantList blocks READ blocks NOTIFY blocksChanged)
     Q_PROPERTY(QVariantList projectFiles READ projectFiles NOTIFY projectFilesChanged)
+    Q_PROPERTY(QStringList recentFolders READ recentFolders NOTIFY recentFoldersChanged)
+    Q_PROPERTY(QString homePath READ homePath CONSTANT)
     Q_PROPERTY(QString projectFolder READ projectFolder NOTIFY projectFilesChanged)
     Q_PROPERTY(QString title READ title NOTIFY tabsChanged)
     Q_PROPERTY(QString sourceText READ sourceText NOTIFY sourceChanged)
@@ -95,6 +97,12 @@ public:
     Q_INVOKABLE bool pathExists(const QUrl &url) const { return QFileInfo::exists(url.toLocalFile()) || QFileInfo(url.toLocalFile()).isSymLink(); }
     Q_INVOKABLE bool isFile(const QUrl &url) const { return QFileInfo(url.toLocalFile()).isFile(); }
     Q_INVOKABLE void setProjectFolder(const QString &path);
+    // Folders opened before, newest first, at most ten; only ones that still exist are listed.
+    QStringList recentFolders() const;
+    QString homePath() const { return QDir::homePath(); }
+    void setRememberFolders(bool remember);
+    // Folders can disappear while kern runs, so the menu re-reads the list when it opens.
+    Q_INVOKABLE void refreshRecentFolders() { emit recentFoldersChanged(); }
     Q_INVOKABLE void activateProjectEntry(int index);
     Q_INVOKABLE void selectTab(int index);
     Q_INVOKABLE bool closeTab(int index, bool discard = false);
@@ -139,6 +147,7 @@ signals:
     void tabsChanged();
     void blocksChanged();
     void projectFilesChanged();
+    void recentFoldersChanged();
     void sourceChanged();
     void errorChanged();
     void unsupportedFileChanged();
@@ -158,6 +167,8 @@ private:
     QVariantList m_blocks;
     QVector<SourceBlock> m_sourceBlocks;
     QString m_projectFolder;
+    QStringList m_recentFolders;
+    bool m_rememberFolders = false;
     QVariantList m_projectFiles;
     QSet<QString> m_expandedFolders;
     QFileSystemWatcher m_folderWatcher;

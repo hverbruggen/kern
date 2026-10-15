@@ -834,6 +834,14 @@ ApplicationWindow {
                 RibbonGroup {
                     title: "File"
                     RibbonButton { glyph: "\uebdf"; tip: "Open project folder  Ctrl+O, Ctrl+Shift+O, or Ctrl+K Ctrl+O"; onClicked: folderDialog.open() }
+                    RibbonButton {
+                        id: recentButton
+                        objectName: "recent-folders-button"
+                        glyph: "\uf1da"
+                        tip: controller.recentFolders.length > 0 ? "Recent project folders" : "No recent project folders yet"
+                        enabled: controller.recentFolders.length > 0
+                        onClicked: { controller.refreshRecentFolders(); recentMenu.popup(recentButton, 0, recentButton.height) }
+                    }
                     RibbonButton { glyph: "\ueb4b"; tip: "Save  Ctrl+S"; enabled: controller.hasDocument; onClicked: root.saveCurrent() }
                     RibbonButton { glyph: "\ueb4a"; tip: "Save as  Ctrl+Shift+S"; enabled: controller.hasDocument; onClicked: { root.commitActive(); saveDialog.open() } }
                     RibbonButton { glyph: "\uf021"; tip: "Reload from disk  Ctrl+R; confirm before discarding unsaved edits"
@@ -1236,6 +1244,47 @@ ApplicationWindow {
         interval: 450
         onTriggered: if (!linkPopup.hovered) linkPopup.close()
     }
+    // The ten most recent project folders; Up, Down and Enter work as in any menu.
+    Menu {
+        id: recentMenu
+        objectName: "recent-folders-menu"
+        width: Math.min(root.width - 40, 460)
+        background: Rectangle {
+            color: uiTheme.surface
+            border.color: Qt.alpha(uiTheme.foreground, 0.28)
+            radius: 5
+        }
+        Repeater {
+            model: controller.recentFolders
+            delegate: MenuItem {
+                id: recentItem
+                objectName: "recent-folder-" + index
+                readonly property string folderPath: modelData
+                implicitHeight: 28
+                contentItem: Text {
+                    text: {
+                        const home = controller.homePath
+                        const shown = home && modelData.startsWith(home) ? "~" + modelData.slice(home.length) : modelData
+                        return shown
+                    }
+                    font.pixelSize: 11
+                    font.family: uiTheme.monoFont
+                    color: uiTheme.foreground
+                    elide: Text.ElideLeft
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    color: recentItem.highlighted ? Qt.alpha(uiTheme.accent, 0.22) : "transparent"
+                }
+                onTriggered: {
+                    root.commitActive()
+                    controller.setProjectFolder(modelData)
+                    root.focusFileList()
+                }
+            }
+        }
+    }
+
     Popup {
         id: linkPopup
         objectName: "link-actions"

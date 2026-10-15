@@ -13,7 +13,8 @@ interface to create, edit and modify tables.
 - Or, if you're a purist, you can switch to source view for the raw text.
 - Click into a table cell to edit it and arrow keys and Tab to move between
   cells.
-- Open several files in tabs and browse a project folder in the sidebar.
+- Open several files in tabs and browse a project folder in the sidebar. The
+  clock button next to Open lists your ten most recent project folders.
 - Plain text files edit as plain text. LaTeX files show a read-only preview and
   are edited in Source.
 - Undo and redo, atomic saves, and a warning when a file changes on disk.

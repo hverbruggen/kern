@@ -27,6 +27,6 @@ done
 for check in --ui-check --editing-check --heading-check --insert-actions-check --shortcuts-check; do
     run "$check" "$here/fixtures/formatting.md"
 done
-for check in --pending-edit-check; do run "$check" "$here/fixtures/formatting.md"; done
+for check in --recent-check --pending-edit-check; do run "$check" "$here/fixtures/formatting.md"; done
 run --table-layout-check "$here/fixtures/multiline-table.md"
 exit $failed

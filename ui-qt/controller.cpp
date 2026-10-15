@@ -18,6 +18,7 @@
 #include <QJsonObject>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QSettings>
 
 extern "C" {
 void kern_free_string(char *);
@@ -583,6 +584,34 @@ void Controller::setProjectFolder(const QString &path)
     m_projectFolder = QFileInfo(path).canonicalFilePath();
     m_expandedFolders.clear();
     rebuildProjectFiles();
+    if (m_rememberFolders) {
+        m_recentFolders.removeAll(m_projectFolder);
+        m_recentFolders.prepend(m_projectFolder);
+        while (m_recentFolders.size() > 10)
+            m_recentFolders.removeLast();
+        QSettings(QStringLiteral("kern"), QStringLiteral("kern")).setValue(QStringLiteral("project/recentFolders"), m_recentFolders);
+        emit recentFoldersChanged();
+    }
+}
+
+QStringList Controller::recentFolders() const
+{
+    QStringList existing;
+    for (const QString &path : m_recentFolders)
+        if (QFileInfo(path).isDir())
+            existing.push_back(path);
+    return existing;
+}
+
+void Controller::setRememberFolders(bool remember)
+{
+    m_rememberFolders = remember;
+    m_recentFolders = remember
+        ? QSettings(QStringLiteral("kern"), QStringLiteral("kern")).value(QStringLiteral("project/recentFolders")).toStringList()
+        : QStringList();
+    while (m_recentFolders.size() > 10)
+        m_recentFolders.removeLast();
+    emit recentFoldersChanged();
 }
 
 void Controller::rebuildProjectFiles()
