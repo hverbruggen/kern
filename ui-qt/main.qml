@@ -55,7 +55,10 @@ ApplicationWindow {
         || discardDialog.visible || quitDialog.visible || reloadDialog.visible || errorDialog.visible
     property bool quitAllowed: false
     property int documentFocusAttempts: 0
-    Component.onCompleted: if (controller.projectFolder && !controller.hasDocument) focusFileList()
+    Component.onCompleted: {
+        if (controller.projectFolder && !controller.hasDocument) focusFileList()
+        else if (startedFresh && controller.hasDocument) focusDocument()
+    }
     // Table highlighted for deletion (dragged over or Shift+arrowed onto), or -1.
     property int selectedTable: -1
     property int pendingCloseTab: -1
@@ -1440,14 +1443,14 @@ ApplicationWindow {
                         onClicked: folderDialog.open()
                     }
                     ToolButton {
+                        objectName: "sidebar-new-file"
                         text: "\uf15b"
-                        visible: !!controller.projectFolder
                         implicitWidth: 24
                         implicitHeight: 24
                         focusPolicy: Qt.NoFocus
-                        ToolTip.text: "New file"
+                        ToolTip.text: controller.projectFolder ? "New file in this folder" : "New document  Ctrl+N"
                         ToolTip.visible: hovered
-                        onClicked: newFileDialog.open()
+                        onClicked: controller.projectFolder ? newFileDialog.open() : root.newDocument()
                     }
                     ToolButton {
                         text: "\uf053"

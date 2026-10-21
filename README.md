@@ -38,8 +38,9 @@ you pick kern in "Open with":
 `cmake --install build --prefix ~/.local`
 
 `kern FILE` opens a file and `kern FOLDER` opens a project. With no argument
-kern starts empty. A file opened without a project, as from a file manager,
-starts with the file list collapsed; Ctrl+Shift+B shows it.
+kern starts with a new empty document, ready to type in. Opening a file replaces
+it if you haven't typed anything. A file opened without a project, as from a
+file manager, starts with the file list collapsed; Ctrl+Shift+B shows it.
 
 ## Using kern
 

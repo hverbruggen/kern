@@ -540,6 +540,10 @@ bool Controller::openPath(const QString &path)
     document.source = bytes;
     document.savedSource = bytes;
     document.diskModified = info.lastModified();
+    // An untouched blank document, such as the one kern starts with, gives way to the file.
+    if (const auto *blank = current(); blank && blank->path.isEmpty() && blank->source.isEmpty()
+        && blank->undo.isEmpty() && blank->redo.isEmpty())
+        m_documents.removeAt(m_current);
     m_documents.push_back(std::move(document));
     m_current = m_documents.size() - 1;
     emit tabsChanged();

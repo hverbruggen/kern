@@ -249,6 +249,22 @@ int runSelfTest()
         if (!last.value(QStringLiteral("info")).toBool()) return 76;
     }
 
+    // Opening a file replaces an untouched blank document but never one with text in it.
+    {
+        QTemporaryDir place;
+        if (!place.isValid()) return 82;
+        QFile named(place.filePath(QStringLiteral("a.md")));
+        if (!named.open(QIODevice::WriteOnly) || named.write("hello\n") < 0) return 83;
+        named.close();
+        Controller blank;
+        blank.newDocument();
+        if (!blank.openPath(named.fileName()) || blank.tabs().size() != 1) return 84;
+        Controller typed;
+        typed.newDocument();
+        typed.setSourceText(QStringLiteral("x"));
+        if (!typed.openPath(named.fileName()) || typed.tabs().size() != 2) return 85;
+    }
+
     // Project tree: files added on disk show up without any user action, in the root and in an expanded folder.
     {
         QTemporaryDir live;
@@ -1505,6 +1521,35 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
             QMetaObject::invokeMethod(entry, "triggered");
             settle();
             if (controller.projectFolder() != wanted || controller.recentFolders().first() != wanted) { app.exit(368); return; }
+            app.exit(0);
+        });
+        return app.exec();
+    }
+    if (arguments.contains(QStringLiteral("--fresh-start-check"))) {
+        QTimer::singleShot(500, &app, [&app, &engine, &controller] {
+            auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+            if (!window) { app.exit(370); return; }
+            auto settle = [] { QEventLoop wait; QTimer::singleShot(200, &wait, &QEventLoop::quit); wait.exec(); };
+            window->requestActivate();
+            settle();
+            // A bare start gives one empty document with the caret in it.
+            if (!controller.hasDocument() || controller.tabs().size() != 1) { app.exit(371); return; }
+            QQuickItem *editor = findVisual(window->contentItem(), QStringLiteral("formatted-editor-0"));
+            if (!editor || !editor->hasActiveFocus()) { app.exit(372); return; }
+            for (const QChar &c : QStringLiteral("typed at once")) {
+                QKeyEvent down(QEvent::KeyPress, 0, Qt::NoModifier, QString(c));
+                QCoreApplication::sendEvent(window, &down);
+                QKeyEvent up(QEvent::KeyRelease, 0, Qt::NoModifier, QString(c));
+                QCoreApplication::sendEvent(window, &up);
+            }
+            settle();
+            if (editor->property("text").toString().isEmpty() || !editor->property("contentDirty").toBool()) { app.exit(373); return; }
+            // With no project folder the sidebar still offers a new-document button.
+            QQuickItem *button = findVisual(window->contentItem(), QStringLiteral("sidebar-new-file"));
+            if (!button || !button->isVisible() || !button->isEnabled()) { app.exit(374); return; }
+            QMetaObject::invokeMethod(button, "clicked");
+            settle();
+            if (controller.tabs().size() != 2) { app.exit(375); return; }
             app.exit(0);
         });
         return app.exec();

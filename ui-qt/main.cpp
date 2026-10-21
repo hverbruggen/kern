@@ -108,6 +108,15 @@ int main(int argc, char **argv)
         }
     }
 
+    // A bare `kern` starts with an empty document, so typing can begin at once.
+#ifdef KERN_WITH_CHECKS
+    const bool freshStart = !openedFile && !openedFolder && arguments.contains(QStringLiteral("--fresh-start-check"));
+#else
+    const bool freshStart = !openedFile && !openedFolder;
+#endif
+    if (freshStart)
+        controller.newDocument();
+
     LocalOnlyFactory networkFactory;
     QQmlApplicationEngine engine;
     engine.setNetworkAccessManagerFactory(&networkFactory);
@@ -117,6 +126,7 @@ int main(int argc, char **argv)
     engine.rootContext()->setContextProperty(QStringLiteral("controller"), &controller);
     engine.rootContext()->setContextProperty(QStringLiteral("uiTheme"), &theme);
     engine.rootContext()->setContextProperty(QStringLiteral("startWithSidebarCollapsed"), openedFile && !openedFolder);
+    engine.rootContext()->setContextProperty(QStringLiteral("startedFresh"), freshStart);
     engine.load(QUrl(QStringLiteral("qrc:/qt/main.qml")));
     if (engine.rootObjects().isEmpty()) {
         for (const QQmlError &warning : qmlWarnings)
