@@ -8,15 +8,17 @@ interface to create, edit and modify tables.
 
 ## Features
 
-- You're editing in a rendered view, so pretty text with headers showing as
-  headers and tables in layout.
+- Visual mode edits Markdown source with formatted headings, code, equations,
+  and tables. Syntax appears locally when the caret enters a construct.
 - Or, if you're a purist, you can switch to source view for the raw text.
 - Click into a table cell to edit it and arrow keys and Tab to move between
   cells.
 - Open several files in tabs and browse a project folder in the sidebar. The
   clock button next to Open lists your ten most recent project folders.
-- Plain text files edit as plain text. LaTeX files show a read-only preview and
-  are edited in Source.
+- Right-click a file in the sidebar to open it in its default application or
+  choose a different one.
+- Plain text and standalone LaTeX files edit as literal source. Equations embedded
+  in Markdown have native previews in Visual mode.
 - Undo and redo, atomic saves, and a warning when a file changes on disk.
 - Follows the current [Omarchy](https://omarchy.org) colors and font when
   you're using that OS. Otherwise it uses a light default theme.
@@ -24,18 +26,25 @@ interface to create, edit and modify tables.
 ## Install
 
 You need Linux, Qt 6 with Quick Controls, a Rust toolchain
-(1.80 or newer), CMake, Ninja, and a C++17 compiler.
+(1.80 or newer), CMake, Ninja, a C++17 compiler, tinyxml2 development files, and GIO's `gio` command for
+opening unsupported files with their default application. CMake downloads a
+pinned, hash-verified MicroTeX release for native equation rendering. Cargo
+dependencies are recorded in the lockfiles. Build and compiler temporary files
+should live outside synced source directories; set `TMPDIR` as well as the build
+location when using external storage.
 
-`cmake -S ui-qt -B build -G Ninja`
-
-`cmake --build build`
-
-`./build/kern notes.md`
+```
+cmake -S ui-qt -B build -G Ninja
+cmake --build build
+./build/kern notes.md
+```
 
 To install the program, icon, and desktop entry into `~/.local`, which also lets
 you pick kern in "Open with":
 
-`cmake --install build --prefix ~/.local`
+```
+cmake --install build --prefix ~/.local
+```
 
 `kern FILE` opens a file and `kern FOLDER` opens a project. With no argument
 kern starts with a new empty document, ready to type in. Opening a file replaces
@@ -93,36 +102,53 @@ typing at the end of the document.
 
 ## Things to know
 
-- **Edits in "Visual" mode can reformat the paragraph you edit.** Qt's Markdown
-  exporter normalizes what it rewrites, so some escapes and spacing in that
-  paragraph may change. kern leaves paragraphs you did not touch exactly as
-  they were, and keeps inline HTML tags in the paragraph you edit. The Visual
-  view does not render HTML formatting such as `\<span style>`; the tags stay in
-  the file. Use Source when you need exact syntax.
-- **Tables are one line per row.** Merged cells and multi-line cells are not
-  supported. A cell cannot contain a line break.
-- **Remote images are not loaded.** A document cannot make kern contact the
-  network. Local images display.
-- **Links open only if considered low-risk.** kern opens web and mail links, and
-  local files that exist and are not executable. Links to headings inside a
-  document do nothing.
-- **Preview rendering is Qt's.** It can differ from GitHub or other renderers.
-  Saving always writes the source text, not the preview.
-- **kern handles UTF-8 text.** It shows a message instead of opening binary or
-  non-UTF-8 files.
+- **Visual edits the source directly.** Markdown delimiters are hidden outside
+  the caret or selection and revealed locally while editing. Hover does not
+  reveal syntax. Ordinary source newlines flow as spaces in Visual mode, so
+  paragraphs wrap to the window width. Blank lines, explicit Markdown hard breaks,
+  code blocks, and raw HTML retain their breaks. The original source newlines are
+  preserved when editing and saving. Typing or
+  deleting backticks, emphasis, headings, links, or fences updates the formatting.
+  Copying a selection copies its source, including Markdown markers.
+- **Code stays distinguishable.** Inline code has a subtle background; fenced
+  and indented code have panels. Fences and language labels reappear while editing
+  the block. Code colouring currently uses a basic token highlighter.
+- **Equations have native previews.** MicroTeX draws inline and display math in
+  Qt, including fractions, roots, scripts, matrices, aligned equations, cases,
+  and scalable delimiters. Click a preview to select its TeX source; moving away
+  restores the preview. Invalid or unsupported equations stay visible as source
+  with a diagnostic on hover. This is a mathematical TeX subset, not full LaTeX
+  or exact KaTeX compatibility: document commands, macro definitions, and `mhchem`
+  are not supported. No external TeX process runs. Standalone `.tex` files remain
+  source editors. Markdown math uses `$...$` and `$$...$$` delimiters.
+- **Raw HTML stays source.** Tags, comments, HTML tables, and iframes are never
+  rendered. HTML attributes and comments remain editable. Markdown-looking text
+  inside an HTML block is not turned into a table widget.
+- **Tables edit source within each cell.** Merged cells and multi-line cells are
+  not supported. Pasted line breaks become spaces; existing `<br>` tags remain
+  literal source. Single-cell edits preserve the rest of the table's source.
+- **Images load locally.** Markdown images can show local previews; remote images
+  remain source. Clicking an image reveals its Markdown.
+- **Links have source and display ranges.** Labels are shown outside editing;
+  clicking into them reveals the destination. Hover offers link actions;
+  Ctrl-click opens links accepted by the existing URL checks.
+- **Unsupported extensions remain editable source.** Kern does not implement all
+  Zettlr/Pandoc features, such as citation resolution, Mermaid diagrams, or Pandoc
+  div widgets. Rendering never deletes or rewrites those constructs.
+- **kern handles UTF-8 text.** Binary or non-UTF-8 files show a message with an
+  option to open them in the default application for their file type.
 - **There is no autosave.** kern asks before discarding unsaved changes, but a
   crash loses them.
 
 ## Development
 
-`cargo test -p kern-core                                  # table parser and
-editor`
+```
+cargo test -p kern-core                         # table parser and editor
 
-`cmake --build build --target kern-checks                 # builds the UI checks`
+cmake --build build --target kern-checks        # builds the UI checks
 
-`ui-qt/tests/run-checks.sh build                          # runs them without a
-display`
-
+ui-qt/tests/run-checks.sh build                 # runs them without a display
+```
 - `core/` is the Markdown table parser and editor, written in Rust.
 - `ui-qt/bridge/` exposes `core/` to C++.
 - `ui-qt/` is the Qt Quick application: `main.qml` is the interface, `
@@ -139,3 +165,9 @@ MIT. See `LICENSE`.
 The application icon's lowercase "k" is derived from the "Great Vibes" typeface
 by TypeSETit, used under the SIL Open Font License 1.1. The toolbar icons are a
 subset of JetBrainsMono Nerd Font, also under the OFL; see `ui-qt/fonts/`.
+
+## Editor architecture
+
+The interaction model of the editor is heavily influenced by that of
+[Zettlr](https://github.com/Zettlr/Zettlr/tree/93d9470114ecf4ed663a346ba099d9e11e37fd2f/source/common/modules/markdown-editor/renderers), one of my favorite writing tools.
+Kern inherits much of the concepts, but uses a native Qt implementation.

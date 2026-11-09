@@ -144,6 +144,15 @@ pub fn new_table(rows: usize, cols: usize) -> String {
 
 /// Finds all pipe tables in `text`, in source order.
 pub fn find_tables(text: &str) -> Vec<PipeTable> {
+    // A table-looking example inside raw HTML or nested code remains literal source.
+    // Use the same CommonMark parser as Visual's decorations for these boundaries.
+    use pulldown_cmark::{Event, Options, Parser, Tag};
+    let protected: Vec<_> = Parser::new_ext(text, Options::ENABLE_MATH | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS)
+        .into_offset_iter().filter_map(|(event, range)| match event {
+            Event::Start(Tag::HtmlBlock | Tag::CodeBlock(_) | Tag::MetadataBlock(_))
+            | Event::DisplayMath(_) => Some(range),
+            _ => None,
+        }).collect();
     let lines: Vec<(usize, &str)> = text
         .split_inclusive('\n')
         .scan(0usize, |offset, line| {
@@ -156,10 +165,28 @@ pub fn find_tables(text: &str) -> Vec<PipeTable> {
     let mut tables = Vec::new();
     let mut i = 0;
     let mut fence: Option<(u8, usize)> = None;
+    let mut math_end: Option<&str> = None;
+    let mut frontmatter = lines.first().is_some_and(|(_, line)| line.trim_start_matches('\u{feff}').trim() == "---");
+    if frontmatter { i = 1; }
     while i + 1 < lines.len() {
         let header = lines[i].1;
+        if frontmatter {
+            if header.trim() == "---" || header.trim() == "..." { frontmatter = false; }
+            i += 1;
+            continue;
+        }
+        if let Some(close) = math_end {
+            if header.trim() == close { math_end = None; }
+            i += 1;
+            continue;
+        }
+        if header.trim() == "$$" || header.trim() == "\\[" {
+            math_end = Some(if header.trim() == "$$" { "$$" } else { "\\]" });
+            i += 1;
+            continue;
+        }
         if let Some((marker, count)) = fence {
-            if fence_marker(header).is_some_and(|(m, n)| m == marker && n >= count) {
+            if fence_marker(header).is_some_and(|(m, n)| m == marker && n >= count && header.trim_start_matches(' ')[n..].trim().is_empty()) {
                 fence = None;
             }
             i += 1;
@@ -171,7 +198,11 @@ pub fn find_tables(text: &str) -> Vec<PipeTable> {
             continue;
         }
         let delimiter = lines[i + 1].1;
-        if header.starts_with("    ")
+        if protected.iter().any(|range| range.contains(&lines[i].0)) {
+            i += 1;
+            continue;
+        }
+        if header.starts_with("    ") || header.starts_with('\t')
             || !looks_like_table_row(header)
             || !looks_like_delimiter_row(delimiter)
             || split_row(header).len() != split_row(delimiter).len()
@@ -296,7 +327,7 @@ fn fence_marker(line: &str) -> Option<(u8, usize)> {
         return None;
     }
     let count = bytes.iter().take_while(|&&c| c == marker).count();
-    (count >= 3).then_some((marker, count))
+    (count >= 3 && (marker != b'`' || !bytes[count..].contains(&b'`'))).then_some((marker, count))
 }
 
 /// Replaces one displayed cell while preserving all bytes outside its content.
@@ -343,4 +374,22 @@ fn escape_cell_pipes(value: &str) -> String {
         backslashes = if ch == '\\' { backslashes + 1 } else { 0 };
     }
     result
+}
+
+#[cfg(test)]
+mod protected_context_tests {
+    use super::*;
+    #[test]
+    fn table_examples_inside_syntax_are_not_editable_tables() {
+        let table = "| A | B |\n| --- | --- |\n| x | y |\n";
+        for (open, close) in [("````md\n```not-a-close\n", "````\n"),
+                              ("~~~md\n~~~not-a-close\n", "~~~\n"),
+                              ("$$\n", "$$\n"), ("\\[\n", "\\]\n"), ("---\n", "---\n"),
+                              ("<div>\n", "</div>\n"), ("<!--\n", "-->\n"), ("<script>\n", "</script>\n")] {
+            let source = format!("{open}{table}{close}\n{table}");
+            let parsed = find_tables(&source);
+            assert_eq!(parsed.len(), 1, "{source}");
+            assert_eq!(&source[parsed[0].byte_range.0..], table);
+        }
+    }
 }

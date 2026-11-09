@@ -58,8 +58,10 @@ int main(int argc, char **argv)
     QGuiApplication app(argc, argv);
     // Toolbar icons come from a bundled subset so they render whatever font the theme picks.
     QFontDatabase::addApplicationFont(QStringLiteral(":/qt/kern-icons.ttf"));
+    QFontDatabase::addApplicationFont(QStringLiteral(":/qt/kern-hidden.ttf"));
+    QFontDatabase::addApplicationFont(QStringLiteral(":/qt/kern-spacer.ttf"));
     app.setApplicationName(QStringLiteral("kern"));
-    app.setApplicationVersion(QStringLiteral("0.1.0"));
+    app.setApplicationVersion(QStringLiteral("0.3.1"));
     // Matches the desktop file name, so the window manager can pair windows with the launcher entry.
     app.setDesktopFileName(QStringLiteral("io.github.hverbruggen.kern"));
     const QStringList arguments = app.arguments();

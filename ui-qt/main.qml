@@ -55,6 +55,7 @@ ApplicationWindow {
         || discardDialog.visible || quitDialog.visible || reloadDialog.visible || errorDialog.visible
     property bool quitAllowed: false
     property int documentFocusAttempts: 0
+    property int restoredFocusAttempts: 0
     Component.onCompleted: {
         if (controller.projectFolder && !controller.hasDocument) focusFileList()
         else if (startedFresh && controller.hasDocument) focusDocument()
@@ -65,7 +66,7 @@ ApplicationWindow {
     property var activeEditor: null
     // True while text typed in the visible editor has not reached the document yet.
     readonly property bool pendingEdit: (activeEditor !== null && activeEditor.contentDirty === true)
-        || (sourceMode && sourceArea.text !== controller.sourceText)
+        || (sourceMode && sourceArea.rawSource !== controller.sourceText.replace(/\r\n|\r|\u2029/g, "\n"))
     property int insertBlock: -1
     property int insertCursor: 0
     property bool insertVisualCursor: false
@@ -239,25 +240,38 @@ ApplicationWindow {
                 target.forceActiveFocus()
             })
         }
-        if (sourceMode && sourceArea.text !== controller.sourceText)
-            controller.setSourceText(sourceArea.text)
+        if (sourceMode)
+            controller.setSourceText(sourceArea.rawSource)
     }
 
     function formatSelection(style) {
-        const editor = activeEditor
+        const editor = sourceMode ? sourceArea : activeEditor
         if (!editor || !editor.richMarkdown) return
         if (editor.selectionEnd > editor.selectionStart) {
             controller.formatSelection(editor.textDocument, editor.selectionStart, editor.selectionEnd, style)
             editor.contentDirty = true
             return
         }
-        if (!editor.explicitTypingStyle) {
-            editor.typingBold = controller.styleAtCursor(editor.textDocument, editor.cursorPosition, "bold")
-            editor.typingItalic = controller.styleAtCursor(editor.textDocument, editor.cursorPosition, "italic")
-            editor.explicitTypingStyle = true
+        const marker = style === "bold" ? "**" : "*"
+        const at = editor.cursorPosition
+        if (editor.text.slice(at, at + marker.length) === marker) {
+            editor.cursorPosition = at + marker.length
+            return
         }
-        if (style === "bold") editor.typingBold = !editor.typingBold
-        else if (style === "italic") editor.typingItalic = !editor.typingItalic
+        editor.insert(at, marker + marker)
+        editor.cursorPosition = at + marker.length
+        editor.contentDirty = true
+    }
+
+    function undoEdit(redo) {
+        const editor = sourceMode ? sourceArea : activeEditor
+        if (editor && editor.activeFocus && (redo ? editor.canRedo : editor.canUndo)) {
+            if (redo) editor.redo(); else editor.undo()
+            if (!sourceMode) editor.contentDirty = true
+        } else {
+            commitActive()
+            if (redo) controller.redo(); else controller.undo()
+        }
     }
 
     function handleStyledKey(editor, event) {
@@ -273,9 +287,30 @@ ApplicationWindow {
 
     // Markdown-style shortcuts while typing in the visual editor.
     function handleMarkdownKey(editor, event) {
+        if (editor.presentation && (event.matches(StandardKey.Copy) || event.matches(StandardKey.Cut))) {
+            const cut = event.matches(StandardKey.Cut)
+            const selected = editor.selectionStart !== editor.selectionEnd
+            editor.presentation.copySource(editor.selectionStart, editor.selectionEnd, cut)
+            if (cut && selected) editor.contentDirty = true
+            event.accepted = true
+            return
+        }
         if (!editor.richMarkdown || editor.readOnly || (event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)))
             return
         let position = -1
+        if (editor.presentation && editor.presentation.literalAt(editor.cursorPosition)) return
+        if (event.key === Qt.Key_Backspace && editor.selectionStart === editor.selectionEnd) {
+            const at = editor.cursorPosition
+            const source = controller.visualSource(editor.textDocument)
+            const lineStart = source.lastIndexOf("\n", at - 1) + 1
+            const prefix = source.slice(lineStart, at)
+            if (/^[ \t]*(?:[-+*]|\d+[.)]|>) (?:\[[ xX]\] )?$/.test(prefix)) {
+                editor.remove(lineStart, at)
+                editor.contentDirty = true
+                event.accepted = true
+                return
+            }
+        }
         if (event.key === Qt.Key_Space)
             position = controller.applyHeadingShortcut(editor.textDocument, editor.cursorPosition)
         else if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && !(event.modifiers & Qt.ShiftModifier))
@@ -291,7 +326,7 @@ ApplicationWindow {
         if (sourceMode) {
             const marker = numbered ? "1. " : "- "
             sourceArea.insert(sourceArea.cursorPosition, marker)
-            controller.setSourceText(sourceArea.text)
+            controller.setSourceText(sourceArea.rawSource)
         } else if (activeEditor && activeEditor.sourceBlockIndex !== undefined) {
             controller.toggleList(activeEditor.textDocument, activeEditor.selectionStart,
                                   activeEditor.selectionEnd, numbered)
@@ -311,7 +346,7 @@ ApplicationWindow {
             insertTargetBlock = activeEditor.sourceBlockIndex
             insertStart = activeEditor.selectionStart
             insertEnd = activeEditor.selectionEnd
-            insertLabelField.text = activeEditor.selectedText
+            insertLabelField.text = controller.visualSource(activeEditor.textDocument).slice(activeEditor.selectionStart, activeEditor.selectionEnd)
         } else return
         insertUrlField.text = ""
         commitActive()
@@ -334,14 +369,14 @@ ApplicationWindow {
             sourceArea.remove(insertStart, insertEnd)
             sourceArea.insert(insertStart, markup)
             sourceArea.cursorPosition = insertStart + markup.length
-            controller.setSourceText(sourceArea.text)
+            controller.setSourceText(sourceArea.rawSource)
             sourceArea.forceActiveFocus()
             return
         }
         const loader = blockRepeater.itemAt(insertTargetBlock)
         const editor = loader && loader.item ? loader.item.editor : null
         if (!editor) return
-        if (!controller.markdown) {
+        if (!editor.richMarkdown || editor.sourceSyntax) {
             const markup = insertionMarkup(label, url)
             editor.remove(insertStart, insertEnd)
             editor.insert(insertStart, markup)
@@ -366,6 +401,7 @@ ApplicationWindow {
     }
 
     function newDocument() {
+        rememberCurrentCaret()
         commitActive()
         controller.newDocument()
         Qt.callLater(root.focusDocument)
@@ -416,9 +452,61 @@ ApplicationWindow {
         })
     }
 
+    function rememberCurrentCaret() {
+        if (!controller.hasDocument || controller.unsupportedFileMessage) return
+        if (sourceMode) {
+            controller.rememberCaret({ kind: "source", position: sourceArea.cursorPosition })
+        } else if (activeEditor && activeEditor.sourceBlockIndex !== undefined) {
+            controller.rememberCaret({ kind: "text", block: activeEditor.sourceBlockIndex,
+                                       position: activeEditor.cursorPosition })
+        } else if (activeEditor && activeEditor.tableIndex !== undefined) {
+            controller.rememberCaret({ kind: "table", table: activeEditor.tableIndex,
+                                       row: activeEditor.rowIndex, col: activeEditor.columnIndex,
+                                       position: activeEditor.cursorPosition })
+        }
+    }
+
+    function focusRememberedDocument() {
+        if (!controller.hasDocument || controller.unsupportedFileMessage) return true
+        const caret = controller.currentCaret
+        if (sourceMode) {
+            sourceArea.cursorPosition = caret.kind === "source" ? Math.min(caret.position, sourceArea.length) : sourceArea.length
+            sourceArea.forceActiveFocus()
+            return sourceArea.activeFocus
+        }
+        if (caret.kind === "table" && root.focusTableCell(caret.table, caret.row, caret.col)) {
+            if (root.activeEditor) root.activeEditor.cursorPosition = Math.min(caret.position, root.activeEditor.length)
+            return true
+        }
+        const block = caret.kind === "text" ? caret.block : blockRepeater.count - 1
+        const loader = blockRepeater.itemAt(block)
+        if (!loader || !loader.item) return false
+        const editor = loader.item.editor
+        if (editor && !editor.readOnly) {
+            editor.cursorPosition = caret.kind === "text" ? Math.min(caret.position, editor.length) : editor.length
+            editor.forceActiveFocus()
+            return editor.activeFocus
+        }
+        if (!loader.item.focusCell) return false
+        const row = Math.max(0, loader.item.rows.length - 1)
+        const col = Math.max(0, loader.item.columns - 1)
+        if (!loader.item.focusCell(row, col)) return false
+        if (root.activeEditor) root.activeEditor.cursorPosition = root.activeEditor.length
+        return true
+    }
+
+    function queueRememberedFocus() {
+        restoredFocusAttempts = 0
+        restoredFocusTimer.interval = 0
+        restoredFocusTimer.restart()
+    }
+
     function closeTab(index) {
+        rememberCurrentCaret()
         commitActive()
-        if (!controller.closeTab(index, false)) {
+        if (controller.closeTab(index, false)) {
+            queueRememberedFocus()
+        } else {
             pendingCloseTab = index
             discardDialog.open()
         }
@@ -452,7 +540,7 @@ ApplicationWindow {
             afterTable = activeEditor.tableIndex
         } else if (activeEditor && activeEditor.sourceBlockIndex !== undefined) {
             index = activeEditor.sourceBlockIndex
-            cursor = activeEditor.cursorPosition
+            cursor = controller.visualOffset(activeEditor.textDocument, activeEditor.cursorPosition)
             visualCursor = controller.markdown
         }
         commitActive()
@@ -567,6 +655,18 @@ ApplicationWindow {
     }
 
     Timer {
+        id: restoredFocusTimer
+        interval: 0
+        onTriggered: {
+            if (root.focusRememberedDocument()) return
+            if (++root.restoredFocusAttempts < 15) {
+                interval = 10
+                restart()
+            }
+        }
+    }
+
+    Timer {
         id: tableFocusTimer
         interval: 0
         onTriggered: {
@@ -612,9 +712,9 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+Shift+S"; enabled: !root.dialogOpen; onActivated: { root.commitActive(); if (controller.hasDocument) saveDialog.open() } }
     Shortcut { sequence: "Ctrl+R"; enabled: !root.dialogOpen && (controller.currentHasPath); onActivated: root.reloadCurrent() }
     Shortcut { sequence: "Ctrl+W"; enabled: !root.dialogOpen; onActivated: root.closeCurrent() }
-    Shortcut { sequence: "Ctrl+Z"; enabled: !root.dialogOpen && (!controller.unsupportedFileMessage); onActivated: { root.commitActive(); controller.undo() } }
-    Shortcut { sequence: "Ctrl+Y"; enabled: !root.dialogOpen && (!controller.unsupportedFileMessage); onActivated: { root.commitActive(); controller.redo() } }
-    Shortcut { sequence: "Ctrl+Shift+Z"; enabled: !root.dialogOpen && (!controller.unsupportedFileMessage); onActivated: { root.commitActive(); controller.redo() } }
+    Shortcut { sequence: "Ctrl+Z"; enabled: !root.dialogOpen && (!controller.unsupportedFileMessage); onActivated: { root.undoEdit(false) } }
+    Shortcut { sequence: "Ctrl+Y"; enabled: !root.dialogOpen && (!controller.unsupportedFileMessage); onActivated: { root.undoEdit(true) } }
+    Shortcut { sequence: "Ctrl+Shift+Z"; enabled: !root.dialogOpen && (!controller.unsupportedFileMessage); onActivated: { root.undoEdit(true) } }
     Shortcut { sequence: "Ctrl+Q"; enabled: !root.dialogOpen; onActivated: root.close() }
     Shortcut { sequence: "Ctrl+Shift+E"; enabled: !root.dialogOpen; onActivated: root.focusFileList() }
     Shortcut { sequence: "Ctrl+Shift+B"; enabled: !root.dialogOpen; onActivated: root.sidebarOpen = !root.sidebarOpen }
@@ -1053,51 +1153,63 @@ ApplicationWindow {
                 onTextEdited: picker.pathError = ""
                 Keys.onDownPressed: { list.forceActiveFocus(); if (list.currentIndex < 0 && listModel.count > 0) list.currentIndex = 0 }
             }
-            ListView {
-                id: list
-                objectName: picker.prefix + "-list"
+            Rectangle {
+                objectName: picker.prefix + "-list-frame"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
+                color: Qt.lighter(uiTheme.background, 1.04)
+                border.color: Qt.alpha(uiTheme.foreground, 0.25)
+                radius: 4
                 clip: true
-                model: listModel
-                keyNavigationEnabled: true
-                currentIndex: -1
-                highlightMoveDuration: 0
-                highlight: Rectangle {
-                    color: Qt.alpha(uiTheme.accent, list.activeFocus ? 0.26 : 0.12)
-                    radius: 3
-                }
-                Keys.onPressed: event => {
-                    if (event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) return
-                    if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) picker.activateCurrent()
-                    else if (event.key === Qt.Key_Left || event.key === Qt.Key_Backspace) picker.goUp()
-                    else if (event.key === Qt.Key_Right) {
-                        if (currentItem && currentItem.fileIsDir) picker.activateCurrent()
-                    } else if (event.text.length === 1 && event.text.trim().length === 1) picker.typeAhead(event.text)
-                    else return
-                    event.accepted = true
-                }
-                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-                delegate: ItemDelegate {
-                    required property int index
-                    required property string fileName
-                    required property url fileUrl
-                    required property bool fileIsDir
-                    objectName: picker.prefix + "-entry-" + fileName
-                    width: list.width
-                    height: 22
-                    topPadding: 0
-                    bottomPadding: 0
-                    focusPolicy: Qt.NoFocus
-                    text: (fileIsDir ? "\uf07b  " : "\uf15b  ") + fileName
-                    font.family: uiTheme.monoFont
-                    background: Item {}
-                    onClicked: {
-                        list.currentIndex = index
-                        if (fileIsDir) picker.navigate(fileUrl)
-                        else if (picker.askName) { picker.nameText = fileName; picker.focusName() }
+                ListView {
+                    id: list
+                    objectName: picker.prefix + "-list"
+                    anchors.fill: parent
+                    anchors.margins: 4
+                    clip: true
+                    model: listModel
+                    keyNavigationEnabled: true
+                    currentIndex: -1
+                    highlightMoveDuration: 0
+                    highlight: Rectangle {
+                        color: Qt.alpha(uiTheme.accent, list.activeFocus ? 0.26 : 0.12)
+                        radius: 3
                     }
-                    onDoubleClicked: if (!fileIsDir && !picker.askName) picker.activateCurrent()
+                    Keys.onPressed: event => {
+                        if (event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)) return
+                        if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) picker.activateCurrent()
+                        else if (event.key === Qt.Key_Left || event.key === Qt.Key_Backspace) picker.goUp()
+                        else if (event.key === Qt.Key_Right) {
+                            if (currentItem && currentItem.fileIsDir) picker.activateCurrent()
+                        } else if (event.text.length === 1 && event.text.trim().length === 1) picker.typeAhead(event.text)
+                        else return
+                        event.accepted = true
+                    }
+                    ScrollBar.vertical: ScrollBar {
+                        objectName: picker.prefix + "-scrollbar"
+                        policy: ScrollBar.AlwaysOn
+                    }
+                    delegate: ItemDelegate {
+                        required property int index
+                        required property string fileName
+                        required property url fileUrl
+                        required property bool fileIsDir
+                        objectName: picker.prefix + "-entry-" + fileName
+                        width: Math.max(0, list.width - 12)
+                        height: 22
+                        topPadding: 0
+                        bottomPadding: 0
+                        focusPolicy: Qt.NoFocus
+                        text: (fileIsDir ? "\uf07b  " : "\uf15b  ") + fileName
+                        font.family: uiTheme.monoFont
+                        background: Item {}
+                        onClicked: {
+                            list.currentIndex = index
+                            if (fileIsDir) picker.navigate(fileUrl)
+                            else if (picker.askName) { picker.nameText = fileName; picker.focusName() }
+                        }
+                        onDoubleClicked: if (!fileIsDir && !picker.askName) picker.activateCurrent()
+                    }
                 }
             }
         }
@@ -1346,7 +1458,7 @@ ApplicationWindow {
             else if (root.insertAfterTableIndex >= 0)
                 table = controller.insertTableAfterTable(root.insertAfterTableIndex, rowCount.value, columnCount.value)
             else if (root.insertVisualCursor)
-                table = controller.insertTableAtVisualCursor(root.insertBlock, root.insertCursor, rowCount.value, columnCount.value)
+                table = controller.insertTable(root.insertBlock, root.insertCursor, rowCount.value, columnCount.value)
             else
                 table = controller.insertTable(root.insertBlock, root.insertCursor, rowCount.value, columnCount.value)
             // Put the caret in the new table's first cell so typing can start at once.
@@ -1369,7 +1481,10 @@ ApplicationWindow {
         modal: true
         anchors.centerIn: parent
         acceptText: "Discard"
-        onAccepted: controller.closeTab(root.pendingCloseTab, true)
+        onAccepted: {
+            controller.closeTab(root.pendingCloseTab, true)
+            root.queueRememberedFocus()
+        }
     }
     KernDialog {
         id: quitDialog
@@ -1492,6 +1607,7 @@ ApplicationWindow {
                     }
                     function openSelection() {
                         const entries = controller.projectFiles
+                        root.rememberCurrentCaret()
                         root.commitActive()
                         let openedFile = false
                         if (anchorIndex >= 0 && anchorIndex !== currentIndex) {
@@ -1547,6 +1663,7 @@ ApplicationWindow {
                         event.accepted = true
                     }
                     delegate: ItemDelegate {
+                        id: projectEntry
                         width: ListView.view.width
                         height: 21
                         leftPadding: 8 + modelData.depth * 13
@@ -1574,9 +1691,34 @@ ApplicationWindow {
                             fileList.currentIndex = index
                             fileList.anchorIndex = -1
                             fileList.rememberCurrent()
+                            root.rememberCurrentCaret()
                             root.commitActive()
                             controller.activateProjectEntry(index)
                         }
+                        TapHandler {
+                            acceptedButtons: Qt.RightButton
+                            onTapped: {
+                                if (!modelData.directory && !modelData.info) {
+                                    projectContextMenu.filePath = modelData.path
+                                    projectContextMenu.popup()
+                                }
+                            }
+                        }
+                    }
+                }
+                Menu {
+                    id: projectContextMenu
+                    objectName: "project-context-menu"
+                    property string filePath: ""
+                    MenuItem {
+                        objectName: "project-open-default"
+                        text: "Open"
+                        onTriggered: controller.openWithDefault(projectContextMenu.filePath)
+                    }
+                    MenuItem {
+                        objectName: "project-open-with"
+                        text: "Open With…"
+                        onTriggered: controller.openWithChooser(projectContextMenu.filePath)
                     }
                 }
             }
@@ -1610,41 +1752,85 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     implicitHeight: 30
                     spacing: 0
-                    Repeater {
-                        model: controller.tabs
-                        delegate: RowLayout {
-                            spacing: 0
-                            ToolButton {
-                                id: fileTab
-                                objectName: "document-tab-" + index
-                                text: (modelData.dirty || (modelData.active && root.pendingEdit) ? "• " : "") + modelData.name
-                                focusPolicy: Qt.NoFocus
-                                topPadding: 3
-                                bottomPadding: 3
-                                leftPadding: 10
-                                rightPadding: 4
-                                background: Rectangle {
-                                    color: modelData.active ? Qt.alpha(uiTheme.foreground, 0.07)
-                                        : fileTab.hovered ? Qt.alpha(uiTheme.foreground, 0.04) : "transparent"
-                                    Rectangle {
-                                        visible: modelData.active
-                                        anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
-                                        height: 2
-                                        color: uiTheme.accent
+                    Flickable {
+                        id: tabStrip
+                        objectName: "document-tab-strip"
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        Layout.preferredHeight: 30
+                        clip: true
+                        contentWidth: tabRow.implicitWidth
+                        contentHeight: height
+                        boundsBehavior: Flickable.StopAtBounds
+                        flickableDirection: Flickable.HorizontalFlick
+                        function revealActive() {
+                            for (let i = 0; i < tabRepeater.count; ++i) {
+                                const tab = tabRepeater.itemAt(i)
+                                if (!tab || !controller.tabs[i].active) continue
+                                if (tab.x < contentX) contentX = tab.x
+                                else if (tab.x + tab.width > contentX + width)
+                                    contentX = tab.x + tab.width - width
+                                break
+                            }
+                        }
+                        Connections {
+                            target: controller
+                            function onTabsChanged() { Qt.callLater(tabStrip.revealActive) }
+                        }
+                        Row {
+                            id: tabRow
+                            height: parent.height
+                            Repeater {
+                                id: tabRepeater
+                                model: controller.tabs
+                                delegate: Row {
+                                    spacing: 0
+                                    ToolButton {
+                                        id: fileTab
+                                        objectName: "document-tab-" + index
+                                        text: (modelData.dirty || (modelData.active && root.pendingEdit) ? "• " : "") + modelData.name
+                                        width: Math.min(200, implicitWidth)
+                                        focusPolicy: Qt.NoFocus
+                                        topPadding: 3
+                                        bottomPadding: 3
+                                        leftPadding: 10
+                                        rightPadding: 4
+                                        contentItem: Text {
+                                            text: fileTab.text
+                                            font: fileTab.font
+                                            color: uiTheme.foreground
+                                            elide: Text.ElideRight
+                                            verticalAlignment: Text.AlignVCenter
+                                        }
+                                        background: Rectangle {
+                                            color: modelData.active ? Qt.alpha(uiTheme.foreground, 0.07)
+                                                : fileTab.hovered ? Qt.alpha(uiTheme.foreground, 0.04) : "transparent"
+                                            Rectangle {
+                                                visible: modelData.active
+                                                anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+                                                height: 2
+                                                color: uiTheme.accent
+                                            }
+                                        }
+                                        onClicked: {
+                                            root.rememberCurrentCaret()
+                                            root.commitActive()
+                                            root.queueRememberedFocus()
+                                            controller.selectTab(index)
+                                        }
+                                    }
+                                    ToolButton {
+                                        objectName: "document-tab-close-" + index
+                                        text: "×"
+                                        focusPolicy: Qt.NoFocus
+                                        implicitWidth: 22
+                                        implicitHeight: 24
+                                        onClicked: root.closeTab(index)
                                     }
                                 }
-                                onClicked: { root.commitActive(); controller.selectTab(index) }
-                            }
-                            ToolButton {
-                                text: "×"
-                                focusPolicy: Qt.NoFocus
-                                implicitWidth: 22
-                                implicitHeight: 24
-                                onClicked: root.closeTab(index)
                             }
                         }
                     }
-                    Item { Layout.fillWidth: true }
                     Label {
                         text: "VISUAL"
                         color: !root.sourceMode ? uiTheme.accent : uiTheme.muted
@@ -1672,8 +1858,24 @@ ApplicationWindow {
                         contentItem: Item {}
                         onCheckedChanged: {
                             if (root.sourceMode !== checked) {
+                                let caret = sourceArea.cursorPosition
+                                if (checked && root.activeEditor && root.activeEditor.sourceBlockIndex !== undefined)
+                                    caret = controller.sourcePosition(root.activeEditor.sourceBlockIndex, root.activeEditor.cursorPosition)
                                 root.commitActive()
                                 root.sourceMode = checked
+                                if (checked) Qt.callLater(() => {
+                                    sourceArea.cursorPosition = Math.min(caret, sourceArea.length)
+                                    sourceArea.forceActiveFocus()
+                                })
+                                else Qt.callLater(() => {
+                                    const location = controller.visualPosition(caret)
+                                    if (location.table !== undefined) root.queueTableCellFocus(location.table, 0, 0)
+                                    else {
+                                        const loader = blockRepeater.itemAt(location.block)
+                                        const target = loader && loader.item ? loader.item.editor : null
+                                        if (target) { target.cursorPosition = Math.min(location.caret, target.length); target.forceActiveFocus() }
+                                    }
+                                })
                             }
                         }
                         indicator: Rectangle {
@@ -1728,8 +1930,29 @@ ApplicationWindow {
                         TextArea {
                             id: sourceArea
                             objectName: "source-editor"
+                            readonly property string rawSource: { text; return controller.visualSource(textDocument) }
+                            property bool richMarkdown: controller.markdown
+                            property bool contentDirty: false
                             width: blockScroll.availableWidth
                             height: Math.max(implicitHeight, blockScroll.availableHeight)
+                            property var presentation: null
+                            property bool markdownDocument: controller.markdown
+                            onMarkdownDocumentChanged: { presentation = null; Qt.callLater(prepare) }
+                            function prepare() {
+                                if (controller.markdown) {
+                                    presentation = controller.prepareVisual(textDocument, text)
+                                    presentation.setPreview(false)
+                                    presentation.configure(uiTheme.foreground, uiTheme.accent, uiTheme.muted, uiTheme.background,
+                                                           font.family, font.pixelSize, controller.documentUrl, width)
+                                } else uiTheme.decorate(textDocument)
+                            }
+                            Component.onCompleted: prepare()
+                            Connections {
+                                target: uiTheme
+                                function onChanged() { sourceArea.prepare() }
+                                function onZoomChanged() { Qt.callLater(sourceArea.prepare) }
+                            }
+                            textFormat: TextEdit.PlainText
                             text: controller.sourceText
                             wrapMode: TextEdit.Wrap
                             selectByMouse: true
@@ -1738,10 +1961,11 @@ ApplicationWindow {
                             color: uiTheme.foreground
                             selectionColor: uiTheme.selection
                             selectedTextColor: uiTheme.foreground
+                            Keys.onPressed: event => root.handleMarkdownKey(sourceArea, event)
                             leftPadding: 24
                             rightPadding: 24
-                            onActiveFocusChanged: if (!activeFocus && root.sourceMode && text !== controller.sourceText)
-                                controller.setSourceText(text)
+                            onActiveFocusChanged: if (!activeFocus && root.sourceMode)
+                                controller.setSourceText(rawSource)
                         }
                     }
                     ScrollView {
@@ -1767,6 +1991,7 @@ ApplicationWindow {
                                     onLoaded: {
                                         item.blockData = modelData
                                         item.blockIndex = index
+                                        if (item.initialize) item.initialize()
                                     }
                                 }
                             }
@@ -1820,9 +2045,15 @@ ApplicationWindow {
                                 objectName: "unsupported-file-message"
                                 Layout.fillWidth: true
                                 text: controller.unsupportedFileMessage
-                                wrapMode: Text.Wrap
+                                wrapMode: Text.WrapAnywhere
                                 horizontalAlignment: Text.AlignHCenter
                                 color: uiTheme.foreground
+                            }
+                            KernButton {
+                                objectName: "unsupported-open-default"
+                                Layout.alignment: Qt.AlignHCenter
+                                text: "Open with Default App"
+                                onClicked: controller.openWithDefault(controller.unsupportedFilePath)
                             }
                             Label {
                                 Layout.fillWidth: true
@@ -1845,8 +2076,9 @@ ApplicationWindow {
             property var blockData
             property int blockIndex
             readonly property var editor: visualEditor
+            function initialize() { visualEditor.text = visualEditor.originalText; visualEditor.prepare() }
             width: parent.width
-            implicitHeight: Math.max(24, visualEditor.contentHeight + 8)
+            implicitHeight: Math.max(24, visualEditor.contentHeight + 12)
             TextEdit {
                 id: visualEditor
                 objectName: "formatted-editor-" + textBlock.blockIndex
@@ -1856,17 +2088,31 @@ ApplicationWindow {
                 property bool typingItalic: false
                 property bool explicitTypingStyle: false
                 property bool contentDirty: false
-                property string originalText: textBlock.blockData
-                    ? controller.markdown ? root.withTrailingParagraphs(
-                            uiTheme.markdownHtml(textBlock.blockData.preview, uiTheme.accent,
-                                                 uiTheme.monoFont, uiTheme.zoomPercent),
-                            textBlock.blockData.trailingBlank)
-                        : textBlock.blockData.preview : ""
+                property bool sourceSyntax: true
+                property var presentation: null
+                property string originalText: textBlock.blockData ? textBlock.blockData.text : ""
+                function prepare() {
+                    if (controller.markdown) {
+                        presentation = controller.prepareVisual(textDocument, text)
+                        presentation.watchEditor(visualEditor)
+                        updatePresentation()
+                    } else uiTheme.decorate(textDocument)
+                }
+                function updatePresentation() {
+                    if (!presentation) return
+                    presentation.configure(uiTheme.foreground, uiTheme.accent, uiTheme.muted, uiTheme.background,
+                                           font.family, font.pixelSize, controller.documentUrl, width)
+                    presentation.select(selectionStart, selectionEnd, activeFocus)
+                }
+                onSelectionStartChanged: if (presentation) presentation.select(selectionStart, selectionEnd, activeFocus)
+                onSelectionEndChanged: if (presentation) presentation.select(selectionStart, selectionEnd, activeFocus)
+                onWidthChanged: updatePresentation()
+                onOriginalTextChanged: if (!contentDirty && text !== originalText) { text = originalText; prepare() }
                 width: parent.width
-                text: originalText
-                textFormat: textBlock.blockData && textBlock.blockData.previewFormat === "rich"
-                    ? TextEdit.RichText : controller.markdown ? TextEdit.RichText : TextEdit.PlainText
-                readOnly: textBlock.blockData && textBlock.blockData.previewFormat === "rich" && !controller.markdown
+                text: ""
+                textFormat: TextEdit.PlainText
+                readOnly: false
+                Component.onCompleted: Qt.callLater(prepare)
                 baseUrl: controller.documentUrl
                 wrapMode: TextEdit.Wrap
                 selectByMouse: true
@@ -1876,6 +2122,15 @@ ApplicationWindow {
                 selectionColor: uiTheme.selection
                 selectedTextColor: uiTheme.foreground
                 activeFocusOnTab: true
+                SourceDecorations {
+                    editor: visualEditor; presentation: visualEditor.presentation
+                    onLinkHovered: link => root.offerLink(visualEditor, link)
+                }
+                Connections {
+                    target: uiTheme
+                    function onChanged() { visualEditor.updatePresentation() }
+                    function onZoomChanged() { Qt.callLater(visualEditor.updatePresentation) }
+                }
                 onLinkHovered: link => root.offerLink(visualEditor, link)
                 onLinkActivated: link => root.offerLink(visualEditor, link)
                 Keys.onPressed: event => {
@@ -1889,15 +2144,15 @@ ApplicationWindow {
                 function commit() {
                     if (!textBlock.blockData || !contentDirty) return
                     contentDirty = false
-                    const replacement = text
+                    const replacement = controller.markdown ? controller.visualSource(textDocument) : text
                     const index = textBlock.blockIndex
                     if (root.activeEditor === this) root.activeEditor = null
-                    if (controller.markdown) controller.editFormattedBlock(index, replacement)
-                    else controller.editTextBlock(index, replacement)
+                    controller.editTextBlock(index, replacement)
                 }
                 onActiveFocusChanged: {
-                    if (activeFocus) root.activeEditor = this
+                    if (activeFocus) { root.activeEditor = this; if (presentation) presentation.select(selectionStart, selectionEnd, true) }
                     else {
+                        if (presentation) presentation.select(-1, -1, false)
                         explicitTypingStyle = false
                         typingBold = false
                         typingItalic = false
@@ -2010,12 +2265,37 @@ ApplicationWindow {
                                 property int tableIndex: tableBlock.blockData.tableIndex
                                 property int rowIndex: cellRow
                                 property int columnIndex: cellCol
-                                property string originalHtml: uiTheme.markdownHtml(tableBlock.rows[cellRow][cellCol],
-                                    uiTheme.accent, uiTheme.monoFont, uiTheme.zoomPercent)
+                                property string originalHtml: tableBlock.rows[cellRow][cellCol]
+                                property var presentation: null
                                 anchors.fill: parent
                                 anchors.margins: 6
-                                text: originalHtml
-                                textFormat: TextEdit.RichText
+                                property bool sourceSyntax: true
+                                text: ""
+                                textFormat: TextEdit.PlainText
+                                function prepare() {
+                                    presentation = controller.prepareVisual(textDocument, text)
+                                    updatePresentation()
+                                }
+                                function updatePresentation() {
+                                    if (!presentation) return
+                                    presentation.configure(uiTheme.foreground, uiTheme.accent, uiTheme.muted, uiTheme.background,
+                                                           font.family, font.pixelSize, controller.documentUrl, width)
+                                    presentation.select(selectionStart, selectionEnd, activeFocus)
+                                }
+                                onSelectionStartChanged: if (presentation) presentation.select(selectionStart, selectionEnd, activeFocus)
+                                onSelectionEndChanged: if (presentation) presentation.select(selectionStart, selectionEnd, activeFocus)
+                                onWidthChanged: updatePresentation()
+                                onOriginalHtmlChanged: if (!contentDirty && text !== originalHtml) { text = originalHtml; prepare() }
+                                Component.onCompleted: { text = originalHtml; prepare() }
+                                SourceDecorations {
+                                    editor: cellEditor; presentation: cellEditor.presentation
+                                    onLinkHovered: link => root.offerLink(cellEditor, link)
+                                }
+                                Connections {
+                                    target: uiTheme
+                                    function onChanged() { cellEditor.updatePresentation() }
+                                    function onZoomChanged() { Qt.callLater(cellEditor.updatePresentation) }
+                                }
                                 baseUrl: controller.documentUrl
                                 wrapMode: TextEdit.WrapAnywhere
                                 font.family: uiTheme.monoFont
@@ -2039,7 +2319,7 @@ ApplicationWindow {
                                     if (root.activeEditor === this) root.activeEditor = null
                                     if (contentDirty) {
                                         contentDirty = false
-                                        controller.editFormattedCell(tableIndex, cellRow, cellCol, text)
+                                        controller.editCell(tableIndex, cellRow, cellCol, controller.visualSource(textDocument).replace(/\r\n|\r|\n/g, " "))
                                     }
                                 }
 
@@ -2060,9 +2340,11 @@ ApplicationWindow {
                                 onActiveFocusChanged: {
                                     if (activeFocus) {
                                         root.activeEditor = this
+                                        if (presentation) presentation.select(selectionStart, selectionEnd, true)
                                         tableBlock.selectedRow = cellRow
                                         tableBlock.selectedCol = cellCol
                                     } else {
+                                        if (presentation) presentation.select(-1, -1, false)
                                         explicitTypingStyle = false
                                         typingBold = false
                                         typingItalic = false

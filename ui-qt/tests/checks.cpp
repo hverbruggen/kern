@@ -1,6 +1,10 @@
 #include "checks.h"
 #include "../controller.h"
 #include "../theme.h"
+#include "../sourcevisual.h"
+#include "../mathrenderer.h"
+#include <QTextLayout>
+#include <QInputMethodEvent>
 
 #include <QGuiApplication>
 #include <QClipboard>
@@ -16,6 +20,7 @@
 #include <QQuickItem>
 #include <QQuickTextDocument>
 #include <QTextDocument>
+#include <QTextCursor>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QWheelEvent>
@@ -112,11 +117,11 @@ int runSelfTest()
     if (!insertion.openPath(insertionPath))
         return 32;
     QTextDocument insertionText;
-    insertionText.setMarkdown(QString::fromUtf8(insertionSource));
+    insertionText.setPlainText(QString::fromUtf8(insertionSource));
     const int visualCursor = insertionText.toPlainText().indexOf(QStringLiteral("tail"));
     if (visualCursor < 0)
         return 33;
-    insertion.insertTableAtVisualCursor(0, visualCursor, 2, 2);
+    insertion.insertTable(0, visualCursor, 2, 2);
     const QString insertedSource = insertion.sourceText();
     const int beforePosition = insertedSource.indexOf(QStringLiteral("Before **bold**"));
     const int tablePosition = insertedSource.indexOf(QStringLiteral("|  |  |\n| --- | --- |"));
@@ -154,11 +159,10 @@ int runSelfTest()
         visualFile.close();
         if (!visual.openPath(visualPath)) return 63;
         UiTheme visualTheme;
-        QString html = visualTheme.markdownHtml(QString::fromUtf8(visualSource), Qt::blue,
-                                                QStringLiteral("monospace"), 100);
+        QString html = QString::fromUtf8(visualSource);
         if (!html.contains(QStringLiteral("Second paragraph."))) return 64;
         html.replace(QStringLiteral("Second paragraph."), QStringLiteral("Second changed."));
-        visual.editFormattedBlock(0, html);
+        visual.editTextBlock(0, html);
         QByteArray expectedVisual = visualSource;
         expectedVisual.replace("Second paragraph.", "Second changed.");
         if (!visual.sourceText().startsWith(QString::fromUtf8(expectedVisual.left(expectedVisual.indexOf("Second")))))
@@ -179,19 +183,17 @@ int runSelfTest()
         if (!guarded.openPath(guardedPath)) return 78;
         UiTheme guardedTheme;
         const QVariantMap textBlock = guarded.blocks()[0].toMap();
-        QString html = guardedTheme.markdownHtml(textBlock.value(QStringLiteral("preview")).toString(), Qt::blue,
-                                                 QStringLiteral("monospace"), 100);
+        QString html = textBlock.value(QStringLiteral("text")).toString();
         if (!html.contains(QStringLiteral("word and"))) return 79;
         html.replace(QStringLiteral("word and"), QStringLiteral("term and"));
-        guarded.editFormattedBlock(0, html);
+        guarded.editTextBlock(0, html);
         if (!guarded.sourceText().startsWith(QStringLiteral("Plain <span style=\"color:red\">red</span> term and `<b>code</b>`.")))
             return 80;
-        if (!html.contains(QStringLiteral("font-family:'monospace'"))) return 82;
         const QVariantMap tableBlock = guarded.blocks()[1].toMap();
         const QString cell = tableBlock.value(QStringLiteral("rows")).toList()[1].toList()[0].toString();
-        QString cellHtml = guardedTheme.markdownHtml(cell, Qt::blue, QStringLiteral("monospace"), 100);
-        cellHtml.replace(QStringLiteral(">x"), QStringLiteral(">w"));
-        guarded.editFormattedCell(0, 1, 0, cellHtml);
+        QString cellHtml = cell;
+        cellHtml.replace(QStringLiteral("x<br>"), QStringLiteral("w<br>"));
+        guarded.editCell(0, 1, 0, cellHtml);
         if (!guarded.sourceText().contains(QStringLiteral("| w<br>y | <u>z</u> |"))) return 81;
     }
 
@@ -322,6 +324,394 @@ int runSelfTest()
 int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &controller, UiTheme &theme,
               const QStringList &arguments, const QList<QQmlError> &qmlWarnings)
 {
+    if (arguments.contains(QStringLiteral("--softbreak-check"))) {
+        auto *window=qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        auto settle=[] { QEventLoop loop; QTimer::singleShot(80,&loop,&QEventLoop::quit); loop.exec(); };
+        auto fail=[](int n,const char *why) { fprintf(stderr,"SOFT BREAK %d: %s\n",n,why); return n; };
+        const QString original=QString::fromUtf8("First café 🦉 line\nsecond line\nthird line.\n\nHard break  \nnext hard\\\nlast hard.\n\n```text\ncode one\ncode two\n```\n\n<div>\nraw HTML\n</div>\n\n- first item\n- second item\n");
+        QTemporaryDir folder;
+        const QString path=folder.filePath("soft.md");
+        const QByteArray bytes=QString(original).replace("\n","\r\n").toUtf8();
+        { QFile file(path); if(!file.open(QIODevice::WriteOnly) || file.write(bytes)!=bytes.size()) return 490; }
+        if(!controller.openPath(path)) return 491;
+        settle();
+        auto *editor=findVisual(window->contentItem(),"formatted-editor-0");
+        if(!editor) return fail(492,"missing editor");
+        auto *quick=qobject_cast<QQuickTextDocument *>(editor->property("textDocument").value<QObject *>());
+        auto *doc=quick->textDocument(); auto *visual=SourceVisual::get(doc);
+        if(documentSource(doc)!=original || doc->isUndoAvailable() || editor->property("contentDirty").toBool()) return fail(493,"initial projection changed source/history");
+        auto rect=[editor](int at) { QRectF r; QMetaObject::invokeMethod(editor,"positionToRectangle",Q_RETURN_ARG(QRectF,r),Q_ARG(int,at)); return r; };
+        if(rect(0).y()!=rect(original.indexOf("second line")).y()) return fail(494,"soft break still starts a line");
+        for(const auto &pair:QList<QPair<QString,QString>>{{"Hard break","next hard"},{"next hard","last hard"},{"code one","code two"},{"<div>","raw HTML"},{"- first","- second"}})
+            if(rect(original.indexOf(pair.first)).y()>=rect(original.indexOf(pair.second)).y()) return fail(495,"structural break collapsed");
+        // A tiling compositor can reject top-level resize requests; constrain
+        // the actual editor to test its layout on both offscreen and Wayland.
+        const qreal editorWidth=editor->width();
+        editor->setWidth(220); settle();
+        if(rect(0).y()>=rect(original.indexOf("third line")).y()) return fail(496,"paragraph does not wrap to width");
+        editor->setWidth(editorWidth); settle();
+        editor->forceActiveFocus();
+        const int boundary=original.indexOf('\n');
+        editor->setProperty("cursorPosition",boundary+1); settle();
+        QKeyEvent type(QEvent::KeyPress,Qt::Key_X,Qt::NoModifier,"X"); QCoreApplication::sendEvent(window,&type); settle();
+        QString edited=original; edited.insert(boundary+1,'X');
+        if(documentSource(doc)!=edited) return fail(497,"typing beside soft break corrupted source");
+        QKeyEvent backspace(QEvent::KeyPress,Qt::Key_Backspace,Qt::NoModifier);
+        editor->setProperty("cursorPosition",boundary+1); QCoreApplication::sendEvent(window,&backspace); settle();
+        QString joined=edited; joined.remove(boundary,1);
+        if(documentSource(doc)!=joined) return fail(498,"backspace did not remove source newline");
+        doc->undo(); settle(); if(documentSource(doc)!=edited) return fail(499,"undo lost newline identity");
+        doc->redo(); settle(); if(documentSource(doc)!=joined) return fail(500,"redo failed");
+        doc->undo(); settle();
+        // A literal U+FFFC from the clipboard must not acquire newline identity
+        // from the adjacent projected space. Pasting multiline source is exact.
+        editor->setProperty("cursorPosition",boundary+1);
+        const QString pasted=QString::fromUtf8("\ufffc pasted\nmore ");
+        QGuiApplication::clipboard()->setText(pasted);
+        QKeyEvent paste(QEvent::KeyPress,Qt::Key_V,Qt::ControlModifier); QCoreApplication::sendEvent(window,&paste); settle();
+        QString withPaste=edited; withPaste.insert(boundary+1,pasted);
+        if(documentSource(doc)!=withPaste) return fail(508,"paste inherited newline identity");
+        doc->undo(); settle(); if(documentSource(doc)!=edited) return fail(509,"paste undo failed");
+        const int end=edited.indexOf("\n\n");
+        QMetaObject::invokeMethod(editor,"select",Q_ARG(int,0),Q_ARG(int,end));
+        QKeyEvent copy(QEvent::KeyPress,Qt::Key_C,Qt::ControlModifier); QCoreApplication::sendEvent(window,&copy); settle();
+        if(QGuiApplication::clipboard()->text()!=edited.left(end)) return fail(501,"copy leaked presentation objects");
+        if(QGuiApplication::clipboard()->supportsSelection() && QGuiApplication::clipboard()->text(QClipboard::Selection)!=edited.left(end)) return fail(512,"primary selection leaked presentation objects");
+        QKeyEvent cut(QEvent::KeyPress,Qt::Key_X,Qt::ControlModifier); QCoreApplication::sendEvent(window,&cut); settle();
+        if(QGuiApplication::clipboard()->text()!=edited.left(end) || documentSource(doc)!=edited.mid(end)) return fail(510,"cut changed source");
+        doc->undo(); settle(); if(documentSource(doc)!=edited) return fail(511,"cut undo failed");
+        // Reclassifying a soft break into a hard break must be one native undo step.
+        editor->setProperty("cursorPosition",boundary);
+        QKeyEvent hard(QEvent::KeyPress,Qt::Key_Backslash,Qt::NoModifier,"\\"); QCoreApplication::sendEvent(window,&hard); settle();
+        QString hardSource=edited; hardSource.insert(boundary,'\\');
+        if(documentSource(doc)!=hardSource || rect(boundary+2).y()<=rect(0).y()) return fail(502,"typing a hard break failed");
+        doc->undo(); settle();
+        if(documentSource(doc)!=edited || !doc->isRedoAvailable()) { fprintf(stderr,"actual=[%s] expected=[%s] redo=%d\n",qPrintable(documentSource(doc)),qPrintable(edited),doc->isRedoAvailable()); return fail(503,"projection broke native undo/redo"); }
+        doc->redo(); settle(); if(documentSource(doc)!=hardSource) return fail(504,"hard break redo failed");
+        doc->undo(); settle();
+        QMetaObject::invokeMethod(editor,"commit"); settle();
+        if(controller.sourceText()!=QString(edited).replace("\n","\r\n") || !controller.save()) { fprintf(stderr,"committed=[%s]\n",qPrintable(controller.sourceText())); return fail(505,"commit lost original line endings"); }
+        QFile saved(path); if(!saved.open(QIODevice::ReadOnly) || saved.readAll()!=QString(edited).replace("\n","\r\n").toUtf8()) return fail(506,"saved bytes differ");
+        if(!qmlWarnings.isEmpty()) { for(const auto &w:qmlWarnings) fprintf(stderr,"%s\n",qPrintable(w.toString())); return fail(507,"QML warnings"); }
+        return 0;
+    }
+    if (arguments.contains(QStringLiteral("--source-editor-check"))) {
+        auto *window=qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        auto settle=[] { QEventLoop loop; QTimer::singleShot(60,&loop,&QEventLoop::quit); loop.exec(); };
+        auto fail=[](int n,const char *message){ fprintf(stderr,"SOURCE EDITOR %d: %s\n",n,message); return n; };
+        const QString sample=QString::fromUtf8("# Title\n\ncore/ and `old` text.\nNext **bold** and *italic* line.\n\n```cpp\nint x = 42;\n```\n\nInline $\\frac{a}{b}$ and $x^2$.\n\n$$\n\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}\n$$\n\n<div class=\"x\">**literal**</div>\n\nEnd café 🦉.\n");
+        controller.newDocument(); controller.setSourceText(sample); settle();
+        auto *editor=findVisual(window->contentItem(),"formatted-editor-0");
+        if(!editor) return fail(460,"missing editor");
+        auto *quick=qobject_cast<QQuickTextDocument *>(editor->property("textDocument").value<QObject *>());
+        auto *doc=quick->textDocument(); auto *visual=SourceVisual::get(doc);
+        if(!visual || documentSource(doc)!=sample) return fail(461,"source not intact");
+        const int ticks=sample.indexOf("`old`");
+        editor->forceActiveFocus(); editor->setProperty("cursorPosition",sample.indexOf("End")); settle();
+        if(!visual->hiddenAt(ticks)) return fail(462,"inactive backticks visible");
+        QRectF hit;
+        if(!QMetaObject::invokeMethod(editor,"positionToRectangle",Q_RETURN_ARG(QRectF,hit),Q_ARG(int,ticks+2)))
+            return fail(479,"cannot obtain code hit position");
+        const QPointF click=editor->mapToScene(hit.center()+QPointF(2,0));
+        QMouseEvent press(QEvent::MouseButtonPress,click,click,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+        QMouseEvent release(QEvent::MouseButtonRelease,click,click,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+        QCoreApplication::sendEvent(window,&press); QCoreApplication::sendEvent(window,&release); settle();
+        if(visual->hiddenAt(ticks)) return fail(463,"click did not reveal backticks");
+        if(documentSource(doc)!=sample || doc->isUndoAvailable()) return fail(464,"presentation changed source/history");
+        editor->setProperty("cursorPosition",sample.indexOf("text.")); settle();
+        for(QChar ch:QStringLiteral("`blah` ")) {
+            QKeyEvent event(QEvent::KeyPress,0,Qt::NoModifier,QString(ch)); QCoreApplication::sendEvent(window,&event); settle();
+        }
+        QString expected=sample; expected.insert(sample.indexOf("text."),"`blah` ");
+        if(documentSource(doc)!=expected) return fail(465,"typed markup changed");
+        int newTicks=expected.indexOf("`blah`");
+        editor->setProperty("cursorPosition",expected.indexOf("End")); settle();
+        if(!visual->hiddenAt(newTicks)) return fail(466,"typed backticks not parsed");
+        editor->setProperty("cursorPosition",newTicks+6); settle();
+        QKeyEvent back(QEvent::KeyPress,Qt::Key_Backspace,Qt::NoModifier); QCoreApplication::sendEvent(window,&back); settle();
+        editor->setProperty("cursorPosition",documentSource(doc).indexOf("End")); settle();
+        if(visual->hiddenAt(newTicks)) return fail(467,"deleted delimiter still decorated");
+        doc->undo(); settle();
+        if(documentSource(doc)!=expected) return fail(468,"undo did not restore exact markup");
+        editor->setProperty("cursorPosition",documentSource(doc).indexOf("End")); settle();
+        if(!visual->hiddenAt(newTicks)) return fail(469,"undo did not restore styling");
+        if(visual->hiddenAt(expected.indexOf("<div"))) return fail(470,"HTML hidden");
+        // IME commits source characters, including surrogate pairs, without escaping or conversion.
+        editor->setProperty("cursorPosition",expected.indexOf("End"));
+        settle();
+        // IME commits are delivered to the focused text item, unlike key events
+        // routed through QQuickWindow. Window injection races native activation.
+        QInputMethodEvent ime; ime.setCommitString(QString::fromUtf8("漢😀")); QCoreApplication::sendEvent(editor,&ime); settle();
+        expected.insert(expected.indexOf("End"),QString::fromUtf8("漢😀"));
+        if(documentSource(doc)!=expected) { fprintf(stderr,"IME expected=[%s] actual=[%s] focus=%d cursor=%d\n",qPrintable(expected),qPrintable(documentSource(doc)),editor->hasActiveFocus(),editor->property("cursorPosition").toInt()); return fail(471,"IME source mismatch"); }
+        const int math=expected.indexOf("$\\frac");
+        editor->setProperty("cursorPosition",expected.indexOf("core/")); settle();
+        if(!visual->hiddenAt(math)) return fail(472,"math preview missing");
+        for(const auto &v:visual->decorations()) {
+            const auto n=v.toMap();
+            auto *item=findVisual(editor,QStringLiteral("source-decoration-%1-%2").arg(n["kind"].toString()).arg(n["from"].toInt()));
+            if(!item || (n["from"].toInt()>70 && item->y()<=0) || item->height()<=0)
+                return fail(476,"preview geometry does not follow source");
+        }
+        auto *equationWidget=findVisual(editor,QStringLiteral("source-decoration-math-%1").arg(math));
+        if(!equationWidget) return fail(480,"missing equation hit target");
+        const QPointF equationPoint=equationWidget->mapToScene(QPointF(equationWidget->width()/2,equationWidget->height()/2));
+        QMouseEvent equationPress(QEvent::MouseButtonPress,equationPoint,equationPoint,Qt::LeftButton,Qt::LeftButton,Qt::NoModifier);
+        QMouseEvent equationRelease(QEvent::MouseButtonRelease,equationPoint,equationPoint,Qt::LeftButton,Qt::NoButton,Qt::NoModifier);
+        QCoreApplication::sendEvent(window,&equationPress); QCoreApplication::sendEvent(window,&equationRelease); settle();
+        if(visual->hiddenAt(math)) return fail(473,"click did not reveal equation source");
+        QMetaObject::invokeMethod(editor,"commit"); settle();
+        if(controller.sourceText()!=expected) return fail(474,"committed source mismatch");
+        for(const QString &equation:QStringList{"\\frac{a_1}{\\sqrt{b}}", "\\begin{pmatrix}a&b\\\\c&d\\end{pmatrix}", "\\begin{aligned}a&=b+c\\\\d&=e\\end{aligned}", "\\left(\\sum_{i=1}^n x_i\\right)", "\\mathbf{x}+\\mathrm{d}t"}) {
+            const auto rendered=renderEquation(equation,true,18,Qt::black);
+            if(rendered.image.isNull()) { fprintf(stderr,"EQUATION %s: %s\n",qPrintable(equation),qPrintable(rendered.error)); return fail(475,"equation rendering failed"); }
+        }
+        const auto fraction=renderEquation("\\frac{a}{b}",false,32,Qt::black).image;
+        int paintedRows=0;
+        for(int y=0;y<fraction.height();++y) {
+            bool ink=false;
+            for(int x=0;x<fraction.width();++x) ink |= qAlpha(fraction.pixel(x,y))>64;
+            paintedRows+=ink;
+        }
+        if(paintedRows<fraction.height()/5) return fail(477,"math glyphs were culled by Qt");
+        if(!qmlWarnings.isEmpty()) { for(const auto &w:qmlWarnings) fprintf(stderr,"%s\n",qPrintable(w.toString())); return fail(478,"QML warnings"); }
+        const int shot=arguments.indexOf("--screenshot");
+        if(shot>=0) { editor=findVisual(window->contentItem(),"formatted-editor-0"); editor->setProperty("cursorPosition",0); settle(); window->grabWindow().save(arguments[shot+1]); }
+        return 0;
+    }
+    if(arguments.contains(QStringLiteral("--mode-source-check"))) {
+        auto *window=qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        auto *root=engine.rootObjects().first();
+        auto settle=[] { QEventLoop loop; QTimer::singleShot(70,&loop,&QEventLoop::quit); loop.exec(); };
+        const QString original=QString::fromUtf8("# Title\r\n\r\nCode ``a`b`` and nonbreaking\u00a0space.\r\nA continuation line.\r\n\r\n<iframe src=\"https://example.org\"></iframe>\r\n");
+        QTemporaryDir modeFolder;
+        QFile modeFile(modeFolder.filePath("mode.md"));
+        if(!modeFile.open(QIODevice::WriteOnly) || modeFile.write(original.toUtf8())<0) return 488;
+        modeFile.close();
+        if(!controller.openPath(modeFile.fileName())) return 489;
+        settle();
+        auto *editor=findVisual(window->contentItem(),"formatted-editor-0");
+        auto *mode=root->findChild<QObject *>("mode-switch");
+        if(!editor || !mode) return 481;
+        editor->forceActiveFocus(); editor->setProperty("cursorPosition",16); settle();
+        mode->setProperty("checked",true); settle();
+        auto *raw=findVisual(window->contentItem(),"source-editor");
+        if(!raw || !raw->hasActiveFocus() || raw->property("cursorPosition").toInt()!=16) return 482;
+        if(root->property("pendingEdit").toBool() || controller.sourceText()!=original) return 483;
+        auto *quick=qobject_cast<QQuickTextDocument *>(raw->property("textDocument").value<QObject *>());
+        if(SourceVisual::get(quick->textDocument())->hiddenAt(14)) return 484;
+        raw->setProperty("cursorPosition",5);
+        QKeyEvent key(QEvent::KeyPress,Qt::Key_X,Qt::NoModifier,"X"); QCoreApplication::sendEvent(window,&key); settle();
+        if(!root->property("pendingEdit").toBool()) return 485;
+        mode->setProperty("checked",false); settle();
+        QString expected=original; expected.insert(5,"X");
+        if(controller.sourceText()!=expected) { fprintf(stderr,"MODE SOURCE: %s\n",qPrintable(controller.sourceText())); return 486; }
+        editor=findVisual(window->contentItem(),"formatted-editor-0");
+        if(!editor || !editor->hasActiveFocus() || editor->property("cursorPosition").toInt()!=6) return 487;
+        return 0;
+    }
+    if (arguments.contains(QStringLiteral("--visual-edit-ranges-check"))) {
+        auto *window=qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        const QString original=QString::fromUtf8("# Heading\n\nAlpha first line\nBeta second line with **Strong** and [Link](https://example.org).\n\nInline `Code` and $x^2$ then Gamma, \\(a+b\\) then Delta.\n\n```cpp\nconst Value = 42;\n```\n\nEscaped \\*literal\\*, café and Omega.\n");
+        for(const QString &word:QStringList{"Heading","Alpha","Beta","Strong","Link","Code","Gamma","Delta","Value","literal","café","Omega"}) {
+            controller.newDocument(); controller.setSourceText(original); QCoreApplication::processEvents();
+            auto *editor=findVisual(window->contentItem(),QStringLiteral("formatted-editor-0"));
+            if(!editor) return 430;
+            auto *quick=qobject_cast<QQuickTextDocument *>(editor->property("textDocument").value<QObject *>());
+            const int at=documentSource(quick->textDocument()).indexOf(word);
+            if(at<0) return 431;
+            QTextCursor cursor(quick->textDocument()); cursor.setPosition(at+1); cursor.deleteChar(); cursor.insertText("Z");
+            editor->setProperty("contentDirty",true); QMetaObject::invokeMethod(editor,"commit");
+            QString expected=original; expected.replace(expected.indexOf(word)+1,1,"Z");
+            if(controller.sourceText()!=expected) {
+                fprintf(stderr,"RANGE %s: %s\n",qPrintable(word),qPrintable(controller.sourceText())); return 432;
+            }
+        }
+        controller.newDocument(); controller.setSourceText(QStringLiteral("- first\n- second\n")); QCoreApplication::processEvents();
+        auto *listEditor=findVisual(window->contentItem(),QStringLiteral("formatted-editor-0"));
+        listEditor->forceActiveFocus(); listEditor->setProperty("cursorPosition",7);
+        QKeyEvent enter(QEvent::KeyPress,Qt::Key_Return,Qt::NoModifier,QStringLiteral("\r"));
+        QCoreApplication::sendEvent(window,&enter);
+        QKeyEvent next(QEvent::KeyPress,Qt::Key_N,Qt::NoModifier,QStringLiteral("next"));
+        QCoreApplication::sendEvent(window,&next); QMetaObject::invokeMethod(listEditor,"commit");
+        if(!controller.sourceText().contains(QStringLiteral("- first\n- next\n- second"))) {
+            fprintf(stderr,"LIST SOURCE %s\n",qPrintable(controller.sourceText())); return 434;
+        }
+        return 0;
+    }
+    if (arguments.contains(QStringLiteral("--visual-layout-check"))) {
+        auto *window=qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        if(!window) return 420;
+        const QString original=QStringLiteral("# Heading\n\nA neatly laid out paragraph\ncontinues on its next source line with **bold**, `inline code`, and $x^2$.\n\n```cpp\nint value = 42;\n```\n");
+        controller.newDocument(); controller.setSourceText(original); QCoreApplication::processEvents();
+        { QEventLoop settle; QTimer::singleShot(300,&settle,&QEventLoop::quit); settle.exec(); }
+        auto *editor=findVisual(window->contentItem(),QStringLiteral("formatted-editor-0"));
+        if(!editor) return 421;
+        auto *quick=qobject_cast<QQuickTextDocument *>(editor->property("textDocument").value<QObject *>());
+        if(!quick) return 422;
+        const auto before=documentSource(quick->textDocument());
+        if(before != original) return 423;
+        const double height=editor->property("contentHeight").toDouble();
+        editor->forceActiveFocus(); QCoreApplication::processEvents();
+        if(documentSource(quick->textDocument())!=before || qAbs(editor->property("contentHeight").toDouble()-height)>0.1) { fprintf(stderr,"FOCUS height %.2f -> %.2f\n",height,editor->property("contentHeight").toDouble()); return 424; }
+        const QPointF point=editor->mapToScene(QPointF(20,20));
+        QMouseEvent move(QEvent::MouseMove,point,point,Qt::NoButton,Qt::NoButton,Qt::NoModifier);
+        QCoreApplication::sendEvent(window,&move); QCoreApplication::processEvents();
+        if(controller.sourceText()!=original || qAbs(editor->property("contentHeight").toDouble()-height)>0.1) return 425;
+        auto *visual=SourceVisual::get(quick->textDocument());
+        if(!visual || !visual->hiddenAt(before.indexOf("`inline code`"))) return 426;
+        bool codePanel=false;
+        for(const auto &v:visual->decorations()) if(v.toMap().value("kind")=="background") codePanel=true;
+        if(!codePanel) return 427;
+        editor->setProperty("cursorPosition",before.indexOf(QStringLiteral("continues")));
+        QKeyEvent key(QEvent::KeyPress,Qt::Key_X,Qt::NoModifier,QStringLiteral("X"));
+        QCoreApplication::sendEvent(window,&key);
+        const int savedZoom=theme.zoomPercent(); theme.setZoomPercent(savedZoom==200 ? 190 : savedZoom+10);
+        QCoreApplication::processEvents();
+        if (!documentSource(quick->textDocument()).contains(QStringLiteral("Xcontinues"))) return 433;
+        theme.setZoomPercent(savedZoom);
+        QMetaObject::invokeMethod(editor,"commit");
+        QString expected=original; expected.replace(QStringLiteral("continues"),QStringLiteral("Xcontinues"));
+        if(controller.sourceText()!=expected) { fprintf(stderr,"LAYOUT SOURCE %s\n",qPrintable(controller.sourceText())); return 428; }
+        controller.undo(); if(controller.sourceText()!=original) return 429;
+        return 0;
+    }
+    if (arguments.contains(QStringLiteral("--source-integrity-check"))) {
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QTemporaryDir folder;
+        if (!window || !folder.isValid()) return 401;
+        const QString sample = QString::fromUtf8(
+            "---\ntitle: syntax\n---\n\n# Heading\n\n"
+            "Edit café 🦉 here, nonbreaking\u00a0space, \\*escaped\\*, <span>HTML</span>, &amp;, two  \nhard lines.\n\n"
+            "[reference][id] and [^note] and $\\frac{a_1}{\\sqrt{b}}$.\n\n"
+            "[id]: https://example.org \"title\"\n[^note]: keep definition\n\n"
+            "````cpp\nconst char *s = \"<b> & $x$\";\n```not-close\n\n| fake | table |\n| --- | --- |\n````\n\n"
+            "~~~python\nprint('hello')\n~~~\n\n$$\n\\sum_{i=1}^{n} x_i\n$$\n\n"
+            "\\[\n\\unknown{keep this}\n\\]\n\n    indented <code>\n\n"
+            "- [x] task\n- nested **strong** and `a_b`\n");
+        for (bool crlf : {false,true}) {
+            QString original = sample;
+            if (crlf) original.replace("\n", "\r\n");
+            const QString path = folder.filePath(crlf ? "crlf.md" : "lf.md");
+            QFile file(path);
+            if (!file.open(QIODevice::WriteOnly) || file.write(original.toUtf8()) < 0) return 402;
+            file.close();
+            if (!controller.openPath(path)) return 403;
+            QCoreApplication::processEvents();
+            if (controller.blocks().size() != 1) return 404;
+            auto *editor = findVisual(window->contentItem(), QStringLiteral("formatted-editor-0"));
+            if (!editor) return 405;
+            editor->forceActiveFocus();
+            QCoreApplication::processEvents();
+            auto *wrapper = qobject_cast<QQuickTextDocument *>(editor->property("textDocument").value<QObject *>());
+            if (!wrapper || !wrapper->textDocument()->toPlainText().contains(QString::fromUtf8("Edit café 🦉 here"))) return 406;
+            if (editor->property("contentDirty").toBool()) return 407;
+            // Real key events into a decorated Qt document, then commit/save/undo/redo.
+            const int at = wrapper->textDocument()->toPlainText().indexOf(QStringLiteral("here"));
+            editor->setProperty("cursorPosition", at);
+            QKeyEvent press(QEvent::KeyPress, Qt::Key_X, Qt::NoModifier, QStringLiteral("X"));
+            QCoreApplication::sendEvent(window,&press);
+            if (!QMetaObject::invokeMethod(editor,"commit")) return 408;
+            QString expected=original;
+            expected.insert(expected.indexOf(QStringLiteral("here")),QLatin1Char('X'));
+            if (controller.sourceText()!=expected) { fprintf(stderr,"INTEGRITY error=%s actual=%s\n",qPrintable(controller.error()),qPrintable(controller.sourceText())); return 409; }
+            controller.undo(); if (controller.sourceText()!=original) return 410;
+            controller.redo(); if (controller.sourceText()!=expected) return 411;
+            if (!controller.save()) return 412;
+            QFile saved(path); if (!saved.open(QIODevice::ReadOnly) || saved.readAll()!=expected.toUtf8()) return 413;
+            if (!controller.reloadCurrent(true) || controller.sourceText()!=expected) return 414;
+        }
+        const auto fraction=renderEquation(QStringLiteral("\\frac{a_1}{b^2}"),false,18,Qt::blue);
+        if(fraction.image.isNull()) { fprintf(stderr,"MATH: %s\n",qPrintable(fraction.error)); return 415; }
+        if(renderEquation(QStringLiteral("\\unsupported{x}"),true,18,Qt::blue).error.isEmpty()) return 416;
+        return 0;
+    }
+    if (arguments.contains(QStringLiteral("--tab-close-check"))) {
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QTemporaryDir folder;
+        if (!window || !folder.isValid()) return 390;
+        auto settle = [] {
+            QEventLoop wait;
+            QTimer::singleShot(70, &wait, &QEventLoop::quit);
+            wait.exec();
+        };
+        for (int i = 0; i < 18; ++i) {
+            const QString path = folder.filePath(QStringLiteral("long_document_name_%1.txt").arg(i));
+            QFile file(path);
+            if (!file.open(QIODevice::WriteOnly) || file.write("abcdefghij") != 10) return 391;
+            file.close();
+            if (!controller.openPath(path)) return 391;
+        }
+        auto *root = window->contentItem();
+        engine.rootObjects().first()->setProperty("sourceMode", true);
+        settle();
+        auto *strip = findVisual(root, QStringLiteral("document-tab-strip"));
+        auto *source = findVisual(root, QStringLiteral("source-editor"));
+        if (!strip || !source || strip->width() <= 0 || strip->width() >= window->width()
+            || strip->x() + strip->width() > window->width()) return 392;
+        auto *firstTab = findVisual(root, QStringLiteral("document-tab-0"));
+        auto *lastTab = findVisual(root, QStringLiteral("document-tab-17"));
+        auto *lastClose = findVisual(root, QStringLiteral("document-tab-close-17"));
+        if (!firstTab || !lastTab || !lastClose || !QMetaObject::invokeMethod(firstTab, "clicked")) return 393;
+        settle();
+        source->forceActiveFocus();
+        source->setProperty("cursorPosition", 3);
+        lastTab = findVisual(root, QStringLiteral("document-tab-17"));
+        if (!lastTab || !QMetaObject::invokeMethod(lastTab, "clicked")) return 394;
+        settle();
+        source->forceActiveFocus();
+        source->setProperty("cursorPosition", 7);
+        lastClose = findVisual(root, QStringLiteral("document-tab-close-17"));
+        if (!lastClose || !QMetaObject::invokeMethod(lastClose, "clicked")) return 395;
+        settle();
+        if (controller.tabs().size() != 17 || !source->hasActiveFocus()
+            || source->property("cursorPosition").toInt() != 10) {
+            fprintf(stderr, "CLOSE: tabs=%lld focus=%d cursor=%d\n", static_cast<long long>(controller.tabs().size()),
+                    source->hasActiveFocus(), source->property("cursorPosition").toInt());
+            return 396;
+        }
+        firstTab = findVisual(root, QStringLiteral("document-tab-0"));
+        if (!firstTab || !QMetaObject::invokeMethod(firstTab, "clicked")) return 397;
+        settle();
+        if (!source->hasActiveFocus() || source->property("cursorPosition").toInt() != 3) {
+            fprintf(stderr, "RESTORE: focus=%d cursor=%d caret=%d kind=%s\n", source->hasActiveFocus(),
+                    source->property("cursorPosition").toInt(), controller.currentCaret().value("position").toInt(),
+                    qPrintable(controller.currentCaret().value("kind").toString()));
+            return 401;
+        }
+        auto *firstClose = findVisual(root, QStringLiteral("document-tab-close-0"));
+        if (!firstClose || !QMetaObject::invokeMethod(firstClose, "clicked")) return 398;
+        settle();
+        if (!source->hasActiveFocus() || source->property("cursorPosition").toInt() != 10) return 399;
+        engine.rootObjects().first()->setProperty("sourceMode", false);
+        settle();
+        auto *penultimateTab = findVisual(root, QStringLiteral("document-tab-14"));
+        if (!penultimateTab || !QMetaObject::invokeMethod(penultimateTab, "clicked")) return 402;
+        settle();
+        auto *visual = findVisual(root, QStringLiteral("formatted-editor-0"));
+        if (!visual) return 403;
+        visual->forceActiveFocus();
+        visual->setProperty("cursorPosition", 4);
+        auto *lastRemainingTab = findVisual(root, QStringLiteral("document-tab-15"));
+        if (!lastRemainingTab || !QMetaObject::invokeMethod(lastRemainingTab, "clicked")) return 404;
+        settle();
+        visual = findVisual(root, QStringLiteral("formatted-editor-0"));
+        if (!visual) return 405;
+        visual->forceActiveFocus();
+        visual->setProperty("cursorPosition", 6);
+        auto *lastRemainingClose = findVisual(root, QStringLiteral("document-tab-close-15"));
+        if (!lastRemainingClose || !QMetaObject::invokeMethod(lastRemainingClose, "clicked")) return 406;
+        settle();
+        visual = findVisual(root, QStringLiteral("formatted-editor-0"));
+        if (!visual || !visual->hasActiveFocus() || visual->property("cursorPosition").toInt() != 4) {
+            fprintf(stderr, "VISUAL CLOSE: focus=%d cursor=%d caret=%d kind=%s\n", visual && visual->hasActiveFocus(),
+                    visual ? visual->property("cursorPosition").toInt() : -1,
+                    controller.currentCaret().value("position").toInt(),
+                    qPrintable(controller.currentCaret().value("kind").toString()));
+            return 407;
+        }
+        return qmlWarnings.isEmpty() ? 0 : 400;
+    }
     if (arguments.contains(QStringLiteral("--zoom-check"))) {
         auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         QQuickItem *preview = window ? findVisual(window->contentItem(), QStringLiteral("formatted-editor-0")) : nullptr;
@@ -518,11 +908,59 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
             settle();
             return true;
         };
+        settle();
+        auto *entry = findVisual(window->contentItem(), QStringLiteral("project-entry-valid.txt"));
+        auto *contextMenu = root->findChild<QObject *>(QStringLiteral("project-context-menu"));
+        if (!entry || !contextMenu) return 243;
+        const QPointF scene = entry->mapToScene(QPointF(20, entry->height() / 2));
+        const QPointF global = window->mapToGlobal(scene.toPoint());
+        QMouseEvent rightDown(QEvent::MouseButtonPress, scene, scene, global,
+                              Qt::RightButton, Qt::RightButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(window, &rightDown);
+        QMouseEvent rightUp(QEvent::MouseButtonRelease, scene, scene, global,
+                            Qt::RightButton, Qt::NoButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(window, &rightUp);
+        settle();
+        if (!contextMenu->property("visible").toBool()
+            || contextMenu->property("filePath").toString() != folder.filePath(QStringLiteral("valid.txt")))
+            return 244;
+        auto *openDefault = root->findChild<QObject *>(QStringLiteral("project-open-default"));
+        auto *openWith = root->findChild<QObject *>(QStringLiteral("project-open-with"));
+        if (!openDefault || !openWith || openDefault->property("text").toString() != QStringLiteral("Open")
+            || openWith->property("text").toString() != QStringLiteral("Open With…")) return 249;
+        QMetaObject::invokeMethod(contextMenu, "close");
         auto *overlay = root->findChild<QQuickItem *>(QStringLiteral("unsupported-file-overlay"));
         auto *error = root->findChild<QObject *>(QStringLiteral("error-dialog"));
         if (!overlay || !error || !clickFile(QStringLiteral("binary.bin"))) return 222;
         if (!overlay->isVisible() || error->property("visible").toBool() || controller.hasDocument()
             || controller.unsupportedFileMessage().isEmpty()) return 223;
+        // The unsupported-file button must launch GIO's default handler directly.
+        // Put a harmless gio stub first in PATH so no external application is opened.
+        QFile gioStub(folder.filePath(QStringLiteral("gio")));
+        const QByteArray stubSource("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$KERN_GIO_TEST_LOG\"\n");
+        if (!gioStub.open(QIODevice::WriteOnly) || gioStub.write(stubSource) != stubSource.size()) return 245;
+        gioStub.close();
+        if (!gioStub.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner)) return 246;
+        const QByteArray oldPath = qgetenv("PATH");
+        const QString launchLog = folder.filePath(QStringLiteral("gio-arguments"));
+        qputenv("PATH", folder.path().toUtf8());
+        qputenv("KERN_GIO_TEST_LOG", launchLog.toUtf8());
+        if (!QMetaObject::invokeMethod(openDefault, "triggered")) return 250;
+        settle();
+        QFile menuArguments(launchLog);
+        if (!menuArguments.open(QIODevice::ReadOnly)
+            || menuArguments.readAll() != QByteArray("open\n") + folder.filePath(QStringLiteral("valid.txt")).toUtf8() + '\n')
+            return 251;
+        menuArguments.close();
+        auto *defaultButton = findVisual(window->contentItem(), QStringLiteral("unsupported-open-default"));
+        if (!defaultButton || !QMetaObject::invokeMethod(defaultButton, "clicked")) return 247;
+        settle();
+        qputenv("PATH", oldPath);
+        qunsetenv("KERN_GIO_TEST_LOG");
+        QFile argumentsFile(launchLog);
+        if (!argumentsFile.open(QIODevice::ReadOnly)
+            || argumentsFile.readAll() != QByteArray("open\n") + folder.filePath(QStringLiteral("binary.bin")).toUtf8() + '\n')
+            return 248;
         if (!clickFile(QStringLiteral("valid.txt")) || overlay->isVisible()
             || controller.sourceText() != QStringLiteral("Editable")) return 224;
         auto *editor = findVisual(window->contentItem(), QStringLiteral("formatted-editor-0"));
@@ -736,12 +1174,15 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
         QObject *editor = window ? findVisual(window->contentItem(), QStringLiteral("formatted-editor-0")) : nullptr;
         if (!editor) return 60;
         QString html = editor->property("text").toString();
-        if (!html.contains(QStringLiteral("Results draft"))) return 61;
-        html.replace(QStringLiteral("Results draft"), QStringLiteral("Results revised"));
-        editor->setProperty("text", html);
+        auto *initial=qobject_cast<QQuickTextDocument *>(editor->property("textDocument").value<QObject *>());
+        if(!initial) return 61;
+        QTextCursor change(initial->textDocument());
+        const int draft=initial->textDocument()->toPlainText().indexOf(QStringLiteral("draft"));
+        if(draft<0) return 61;
+        change.setPosition(draft); change.setPosition(draft+5,QTextCursor::KeepAnchor); change.insertText(QStringLiteral("revised"));
         editor->setProperty("contentDirty", true);
         if (!QMetaObject::invokeMethod(editor, "commit")) return 62;
-        if (!controller.sourceText().contains(QStringLiteral("# Results revised"))) return 63;
+        if (!controller.sourceText().contains(QStringLiteral("# Results **revised**"))) { fprintf(stderr,"FORMATTED: %s\n",qPrintable(controller.sourceText())); return 63; }
         if (!controller.sourceText().contains(QStringLiteral("| Alpha | 12 | *review* |"))) return 64;
         QCoreApplication::processEvents();
         editor = findVisual(window->contentItem(), QStringLiteral("formatted-editor-0"));
@@ -799,7 +1240,7 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
         auto *quickDocument = qobject_cast<QQuickTextDocument *>(
             editor->property("textDocument").value<QObject *>());
         if (!quickDocument) return 91;
-        const int position = quickDocument->textDocument()->toPlainText().indexOf(QStringLiteral("An inline"));
+        const int position = quickDocument->textDocument()->toPlainText().indexOf(QStringLiteral("An [inline"));
         if (position < 0) return 92;
         editor->setProperty("cursorPosition", position);
         editor->forceActiveFocus();
@@ -807,12 +1248,12 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
         QObject *root = engine.rootObjects().first();
         if (!QMetaObject::invokeMethod(root, "formatSelection", Q_ARG(QVariant, QVariant(QStringLiteral("bold")))))
             return 93;
-        if (!editor->property("typingBold").toBool()) return 94;
+        if (!quickDocument->textDocument()->toPlainText().mid(position,4).startsWith("****")) return 94;
         QKeyEvent boldLetter(QEvent::KeyPress, Qt::Key_X, Qt::NoModifier, QStringLiteral("X"));
         QCoreApplication::sendEvent(window, &boldLetter);
         if (!QMetaObject::invokeMethod(root, "formatSelection", Q_ARG(QVariant, QVariant(QStringLiteral("bold")))))
             return 95;
-        if (editor->property("typingBold").toBool()) return 96;
+
         QKeyEvent plainLetter(QEvent::KeyPress, Qt::Key_Y, Qt::NoModifier, QStringLiteral("Y"));
         QCoreApplication::sendEvent(window, &plainLetter);
         if (!QMetaObject::invokeMethod(root, "formatSelection", Q_ARG(QVariant, QVariant(QStringLiteral("italic")))))
@@ -844,7 +1285,8 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
         QKeyEvent backspace(QEvent::KeyPress, Qt::Key_Backspace, Qt::NoModifier, QStringLiteral("\b"));
         QCoreApplication::sendEvent(window, &backspace);
         const QString afterBackspace = quickDocument->textDocument()->toPlainText();
-        if (afterBackspace != QString(beforeBackspace).remove(lineEnd + 5, 1)) return 104;
+        QString expectedBackspace=beforeBackspace; expectedBackspace.insert(lineEnd+6,"***");
+        if (afterBackspace != expectedBackspace) return 104;
         if (afterBackspace.contains(QLatin1Char('\b'))) return 105;
         if (!QMetaObject::invokeMethod(editor, "commit")) return 106;
         if (controller.sourceText().contains(QLatin1Char('\b'))) return 107;
@@ -871,7 +1313,7 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
         type(QStringLiteral("## Title\nbody"));
         if (!QMetaObject::invokeMethod(editor, "commit")) return 271;
         const QString source = controller.sourceText();
-        if (!source.startsWith(QStringLiteral("## Title\n\nbody"))) {
+        if (!source.startsWith(QStringLiteral("## Title\nbody"))) {
             fprintf(stderr, "HEADING SOURCE: %s\n", source.toUtf8().constData());
             return 272;
         }
@@ -970,6 +1412,13 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
         settle();
         QQuickItem *folderList = list("folder-list");
         if (!folderList || !folderList->hasActiveFocus() || folderList->property("currentIndex").toInt() != 0) return 292;
+        QQuickItem *folderFrame = list("folder-list-frame");
+        if (!folderFrame || folderList->parentItem() != folderFrame
+            || QQmlProperty::read(folderFrame, QStringLiteral("border.color")).value<QColor>().alpha() == 0)
+            return 308;
+        const int screenshot = arguments.indexOf(QStringLiteral("--screenshot"));
+        if (screenshot >= 0 && screenshot + 1 < arguments.size())
+            window->grabWindow().save(arguments[screenshot + 1]);
         press(Qt::Key_Down);
         if (folderList->property("currentIndex").toInt() != 1) return 293;
         press(Qt::Key_Return);
@@ -1170,7 +1619,7 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
             if (!editor) return false;
             auto *document = qobject_cast<QQuickTextDocument *>(editor->property("textDocument").value<QObject *>());
             if (!document) return false;
-            const int position = document->textDocument()->toPlainText().indexOf(QStringLiteral("An inline"));
+            const int position = document->textDocument()->toPlainText().indexOf(QStringLiteral("An [inline"));
             if (position < 0) return false;
             editor->setProperty("cursorPosition", position);
             editor->forceActiveFocus();
@@ -1426,7 +1875,10 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
                 if (!again || !again->hasActiveFocus()) { app.exit(347); return; }
             }
             type(QStringLiteral(" unfinished-sentence"));
-            if (!root->property("pendingEdit").toBool()) { app.exit(343); return; }
+            if (!root->property("pendingEdit").toBool()) {
+                auto *e=findVisual(window->contentItem(),QStringLiteral("formatted-editor-0"));
+                fprintf(stderr,"PENDING error=%s active=%d dirty=%d cursor=%d text=%s\n",qPrintable(controller.error()),e ? e->hasActiveFocus():false,e ? e->property("contentDirty").toBool():false,e ? e->property("cursorPosition").toInt():-1,e ? qPrintable(e->property("text").toString()):"missing");
+                app.exit(343); return; }
             // Switching tabs the way a tab click does must keep the half-written text.
             QMetaObject::invokeMethod(root, "commitActive");
             if (!controller.sourceText().contains(QStringLiteral("unfinished-sentence"))) { app.exit(344); return; }
@@ -1464,10 +1916,10 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
             settle();
             QMetaObject::invokeMethod(root, "commitEdits", Q_ARG(QVariant, true));
             settle();
-            if (controller.sourceText() != QStringLiteral("Hello world\n\n")) { app.exit(350); return; }
+            if (controller.sourceText() != QStringLiteral("Hello world\n")) { app.exit(350); return; }
             QQuickItem *blank = findVisual(window->contentItem(), QStringLiteral("formatted-editor-0"));
             if (!blank || !blank->hasActiveFocus() || blank->property("cursorPosition").toInt() != blank->property("length").toInt()
-                || blank->property("length").toInt() != 12) { app.exit(351); return; }
+                || blank->property("length").toInt() != 12) { fprintf(stderr,"BLANK length=%d cursor=%d focus=%d text=%s\n",blank ? blank->property("length").toInt() : -1, blank ? blank->property("cursorPosition").toInt() : -1,blank ? blank->hasActiveFocus() : false,blank ? qPrintable(blank->property("text").toString()) : "missing"); app.exit(351); return; }
             type(QStringLiteral("next"));
             QMetaObject::invokeMethod(root, "commitActive");
             if (!controller.sourceText().simplified().contains(QStringLiteral("Hello world next"))) { app.exit(352); return; }
@@ -1582,7 +2034,9 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
                 app.exit(30);
                 return;
             }
-            cell->setProperty("text", QStringLiteral("Changed via QML"));
+            auto *cellDoc=qobject_cast<QQuickTextDocument *>(cell->property("textDocument").value<QObject *>());
+            QTextCursor cellChange(cellDoc->textDocument()); cellChange.select(QTextCursor::Document);
+            cellChange.insertText(QStringLiteral("Changed via QML"));
             cell->setProperty("contentDirty", true);
             if (!QMetaObject::invokeMethod(cell, "commit")) {
                 app.exit(31);
@@ -1598,9 +2052,9 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
                 app.exit(33);
                 return;
             }
-            QString html = formattedCell->property("text").toString();
-            html.replace(QStringLiteral("review"), QStringLiteral("approved"));
-            formattedCell->setProperty("text", html);
+            auto *formattedDoc=qobject_cast<QQuickTextDocument *>(formattedCell->property("textDocument").value<QObject *>());
+            QTextCursor formattedChange(formattedDoc->textDocument()); formattedChange.select(QTextCursor::Document);
+            formattedChange.insertText(QStringLiteral("*approved*"));
             formattedCell->setProperty("contentDirty", true);
             if (!QMetaObject::invokeMethod(formattedCell, "commit")) {
                 app.exit(34);
@@ -1639,6 +2093,16 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
         if (!window)
             return 2;
         const QString outputPath = arguments[screenshotIndex + 1];
+        if (arguments.contains(QStringLiteral("--focus-editor"))) {
+            if (auto *editor=findVisual(window->contentItem(),QStringLiteral("formatted-editor-0"))) editor->forceActiveFocus();
+        }
+        if (arguments.contains(QStringLiteral("--reveal-code"))) {
+            if (auto *editor=findVisual(window->contentItem(),QStringLiteral("formatted-editor-0"))) {
+                auto *quick=qobject_cast<QQuickTextDocument *>(editor->property("textDocument").value<QObject *>());
+                const int tick=documentSource(quick->textDocument()).indexOf('`');
+                editor->forceActiveFocus(); editor->setProperty("cursorPosition",qMax(0,tick+2));
+            }
+        }
         QTimer::singleShot(500, &app, [&app, window, outputPath] {
             window->grabWindow().save(outputPath);
             app.quit();

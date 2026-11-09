@@ -1,5 +1,5 @@
+#include "sourcevisual.h"
 #include "controller.h"
-#include "htmlguard.h"
 
 #include <QDir>
 #include <QGuiApplication>
@@ -17,6 +17,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
+#include <QProcess>
 #include <QSaveFile>
 #include <QSettings>
 
@@ -48,39 +49,31 @@ bool dirty(const OpenDocument &document)
     return document.source != document.savedSource;
 }
 
-QString markdownFromRichHtml(const QString &html)
+qsizetype sourceOffset(const QString &original, qsizetype offset)
 {
-    QString cleanHtml = html;
-    const QRegularExpression bodyTag(QStringLiteral("<body[^>]*>"));
-    const auto body = bodyTag.match(cleanHtml);
-    if (body.hasMatch()) {
-        QString opening = body.captured();
-        opening.replace(QRegularExpression(QStringLiteral("font-family:[^;]*;")),
-                        QStringLiteral("font-family:'Sans Serif';"));
-        cleanHtml.replace(body.capturedStart(), body.capturedLength(), opening);
-    }
-    QTextDocument formatted;
-    formatted.setHtml(cleanHtml);
-    return htmlguard::unescapeCode(formatted.toMarkdown(QTextDocument::MarkdownDialectGitHub));
+    qsizetype at = 0;
+    for (qsizetype n = 0; n < offset && at < original.size(); ++n, ++at)
+        if (original[at] == QLatin1Char('\r') && at+1 < original.size() && original[at+1] == QLatin1Char('\n')) ++at;
+    return at;
 }
 
-// Markdown cannot hold an empty paragraph, so empty paragraphs at the very end of the last block
-// are kept as extra blank lines after the final text: one blank line per empty paragraph.
-int trailingEmptyParagraphs(const QString &html)
+// Qt's plain text document normalizes line endings. Apply only the changed range
+// back to the original buffer so untouched CRLFs, mixed endings and whitespace survive.
+QString sourceEdit(const QString &original, QString edited)
 {
-    static const QRegularExpression tail(QStringLiteral(
-        R"((?:<p\b[^>]*-qt-paragraph-type:empty[^>]*>\s*<br\s*/?>\s*</p>\s*)+(?=</body>))"));
-    const auto match = tail.match(html);
-    if (!match.hasMatch())
-        return 0;
-    static const QRegularExpression paragraph(QStringLiteral(R"(<p\b)"));
-    qsizetype count = 0;
-    auto all = paragraph.globalMatch(match.captured());
-    while (all.hasNext()) {
-        all.next();
-        ++count;
-    }
-    return int(qMin<qsizetype>(count, 50));
+    QString baseline = original;
+    baseline.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    baseline.replace(QLatin1Char('\r'), QLatin1Char('\n'));
+    baseline.replace(QChar::ParagraphSeparator, QLatin1Char('\n'));
+    edited.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    edited.replace(QLatin1Char('\r'), QLatin1Char('\n'));
+    qsizetype prefix = 0, suffix = 0;
+    while (prefix < baseline.size() && prefix < edited.size() && baseline[prefix] == edited[prefix]) ++prefix;
+    while (suffix < baseline.size() - prefix && suffix < edited.size() - prefix
+           && baseline[baseline.size()-1-suffix] == edited[edited.size()-1-suffix]) ++suffix;
+    QString inserted = edited.mid(prefix, edited.size()-prefix-suffix);
+    if (original.contains(QStringLiteral("\r\n"))) inserted.replace(QStringLiteral("\n"), QStringLiteral("\r\n"));
+    return original.left(sourceOffset(original, prefix)) + inserted + original.mid(sourceOffset(original, baseline.size()-suffix));
 }
 
 QJsonArray tablesFor(const QByteArray &source)
@@ -92,59 +85,6 @@ bool isLatexFile(const QString &path)
 {
     return QStringList{QStringLiteral("tex"), QStringLiteral("ltx"), QStringLiteral("latex")}
         .contains(QFileInfo(path).suffix().toLower());
-}
-
-QString latexPreview(const QString &source)
-{
-    static const QRegularExpression heading(QStringLiteral(R"(^\\(part|chapter|section|subsection|subsubsection)\{([^{}]*)\}\s*$)"));
-    static const QRegularExpression inlineCommand(QStringLiteral(R"(\\(textbf|textit|emph|texttt)\{([^{}]*)\})"));
-    static const QRegularExpression beginCode(QStringLiteral(R"(^\\begin\{(verbatim|listing|minted)\})"));
-    static const QRegularExpression endCode(QStringLiteral(R"(^\\end\{(verbatim|listing|minted)\})"));
-    QString html;
-    bool code = false;
-    const QStringList lines = source.split('\n');
-    for (const QString &line : lines) {
-        if (beginCode.match(line).hasMatch()) {
-            html += QStringLiteral("<pre>");
-            code = true;
-            continue;
-        }
-        if (code && endCode.match(line).hasMatch()) {
-            html += QStringLiteral("</pre>");
-            code = false;
-            continue;
-        }
-        if (code) {
-            html += line.toHtmlEscaped() + QLatin1Char('\n');
-            continue;
-        }
-        const auto head = heading.match(line);
-        if (head.hasMatch()) {
-            const QString command = head.captured(1);
-            const int level = command == QStringLiteral("part") || command == QStringLiteral("chapter") ? 1
-                : command == QStringLiteral("section") ? 2
-                : command == QStringLiteral("subsection") ? 3 : 4;
-            html += QStringLiteral("<h%1>%2</h%1>").arg(level).arg(head.captured(2).toHtmlEscaped());
-            continue;
-        }
-        QString formatted;
-        qsizetype offset = 0;
-        auto matches = inlineCommand.globalMatch(line);
-        while (matches.hasNext()) {
-            const auto match = matches.next();
-            formatted += line.mid(offset, match.capturedStart() - offset).toHtmlEscaped();
-            const QString command = match.captured(1);
-            const QString tag = command == QStringLiteral("textbf") ? QStringLiteral("b")
-                : command == QStringLiteral("texttt") ? QStringLiteral("code") : QStringLiteral("i");
-            formatted += QStringLiteral("<%1>%2</%1>").arg(tag, match.captured(2).toHtmlEscaped());
-            offset = match.capturedEnd();
-        }
-        formatted += line.mid(offset).toHtmlEscaped();
-        html += formatted + QStringLiteral("<br/>");
-    }
-    if (code)
-        html += QStringLiteral("</pre>");
-    return html;
 }
 
 constexpr int kMaxHistorySteps = 1000;
@@ -159,111 +99,6 @@ void trimHistory(QVector<UndoStep> &history)
         bytes -= history.first().before.size() + history.first().after.size();
         history.removeFirst();
     }
-}
-
-// Splits Markdown into paragraph chunks. Each chunk keeps the blank lines that follow it, so
-// joining the chunks reproduces the text. Blank lines inside fenced code do not split.
-QStringList paragraphChunks(const QString &text)
-{
-    QStringList chunks;
-    QString chunk;
-    bool inFence = false;
-    bool pendingBlank = false;
-    for (const QString &line : text.split(QLatin1Char('\n'))) {
-        const QString trimmed = line.trimmed();
-        const bool blank = trimmed.isEmpty();
-        if (pendingBlank && !blank && !inFence) {
-            chunks.push_back(chunk);
-            chunk.clear();
-            pendingBlank = false;
-        }
-        if (!blank && (trimmed.startsWith(QLatin1String("```")) || trimmed.startsWith(QLatin1String("~~~"))))
-            inFence = !inFence;
-        if (!chunk.isEmpty() || !chunks.isEmpty() || !blank)
-            chunk += line + QLatin1Char('\n');
-        pendingBlank = blank && !inFence ? !chunk.isEmpty() : pendingBlank;
-    }
-    if (!chunk.isEmpty())
-        chunks.push_back(chunk);
-    return chunks;
-}
-
-QString normalizedMarkdown(const QString &markdown)
-{
-    QTextDocument document;
-    document.setMarkdown(markdown);
-    return htmlguard::unescapeCode(document.toMarkdown(QTextDocument::MarkdownDialectGitHub));
-}
-
-// Qt's Markdown exporter rewrites constructs it does not model (inline HTML, hard breaks,
-// reference links, footnotes, escapes). To avoid damaging text the user did not touch, keep the
-// original source of every paragraph the edit left alone.
-//
-// Each original paragraph exports to zero or more paragraphs of the normalized document. The
-// edit is located by comparing the normalized original with the edited export from both ends;
-// only the original paragraphs that overlap the changed range are replaced.
-QString mergeEditedMarkdown(const QString &original, const QString &edited)
-{
-    // `edited` was exported from text whose HTML tags were swapped for markers (see htmlguard.h).
-    QStringList tags;
-    const QString guarded = htmlguard::protect(original, &tags);
-    const QStringList originalChunks = paragraphChunks(original);
-    const QStringList baseline = paragraphChunks(normalizedMarkdown(guarded));
-    const QStringList editedChunks = paragraphChunks(edited);
-
-    QVector<qsizetype> firstBaseline(originalChunks.size() + 1, 0);
-    for (qsizetype i = 0; i < originalChunks.size(); ++i) {
-        QStringList chunkTags;
-        const QString chunk = htmlguard::protect(originalChunks[i], &chunkTags);
-        firstBaseline[i + 1] = firstBaseline[i] + paragraphChunks(normalizedMarkdown(chunk)).size();
-    }
-    if (firstBaseline.last() != baseline.size())
-        return htmlguard::restore(edited, tags);
-
-    const qsizetype common = qMin(baseline.size(), editedChunks.size());
-    qsizetype prefix = 0;
-    while (prefix < common && baseline[prefix].trimmed() == editedChunks[prefix].trimmed())
-        ++prefix;
-    if (prefix == baseline.size() && prefix == editedChunks.size())
-        return original;
-    qsizetype suffix = 0;
-    while (suffix < common - prefix
-           && baseline[baseline.size() - 1 - suffix].trimmed() == editedChunks[editedChunks.size() - 1 - suffix].trimmed())
-        ++suffix;
-
-    // Widen the changed range to whole original paragraphs.
-    auto ownerOf = [&](qsizetype baselineIndex) {
-        qsizetype owner = 0;
-        while (owner + 1 < originalChunks.size() && firstBaseline[owner + 1] <= baselineIndex)
-            ++owner;
-        return owner;
-    };
-    qsizetype firstChanged = prefix < baseline.size() ? ownerOf(prefix) : originalChunks.size();
-    qsizetype lastChanged = baseline.size() - suffix > 0 ? ownerOf(baseline.size() - suffix - 1) : -1;
-    if (lastChanged < firstChanged)
-        lastChanged = firstChanged - 1;
-    const qsizetype editedFrom = firstChanged < originalChunks.size() ? firstBaseline[firstChanged] : firstBaseline.last();
-    const qsizetype editedTo = editedChunks.size() - (baseline.size() - firstBaseline[lastChanged + 1]);
-    if (editedFrom > editedTo || editedTo > editedChunks.size())
-        return htmlguard::restore(edited, tags);
-
-    QString result;
-    auto append = [&result](const QString &chunk) {
-        if (!result.isEmpty() && !result.endsWith(QLatin1String("\n\n")))
-            result += result.endsWith(QLatin1Char('\n')) ? QStringLiteral("\n") : QStringLiteral("\n\n");
-        result += chunk;
-    };
-    for (qsizetype i = 0; i < firstChanged; ++i)
-        append(originalChunks[i]);
-    for (qsizetype i = editedFrom; i < editedTo; ++i)
-        append(htmlguard::restore(editedChunks[i], tags));
-    // Definitions (link references, footnotes) export to nothing; keep those inside the range.
-    for (qsizetype i = firstChanged; i <= lastChanged && i < originalChunks.size(); ++i)
-        if (firstBaseline[i + 1] == firstBaseline[i])
-            append(originalChunks[i]);
-    for (qsizetype i = lastChanged + 1; i < originalChunks.size(); ++i)
-        append(originalChunks[i]);
-    return result;
 }
 
 // Resolves a link target from a document. Returns an empty URL and sets `reason` when the link
@@ -445,8 +280,8 @@ void Controller::rebuildBlocks()
             trailingBlank = qBound(0, trailingBlank - 1, 50);
         }
         m_blocks.push_back(QVariantMap{{"kind", "text"}, {"text", text},
-                                       {"preview", latex ? latexPreview(text) : text},
-                                       {"previewFormat", latex ? "rich" : "source"},
+                                       {"preview", text},
+                                       {"previewFormat", "source"},
                                        {"trailingBlank", trailingBlank}});
     };
     qsizetype offset = 0;
@@ -691,6 +526,45 @@ bool Controller::closeTab(int index, bool discard)
     return true;
 }
 
+void Controller::openWithChooser(const QString &path)
+{
+    const QFileInfo file(path);
+    if (!file.isFile()) {
+        setError(QStringLiteral("Cannot open file: ") + path);
+        return;
+    }
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(file.canonicalFilePath())))
+        setError(QStringLiteral("Could not open file: ") + path);
+}
+
+void Controller::openWithDefault(const QString &path)
+{
+    const QFileInfo file(path);
+    if (!file.isFile()) {
+        setError(QStringLiteral("Cannot open file: ") + path);
+        return;
+    }
+    // GIO launches the registered default handler directly. The desktop portal used by
+    // QDesktopServices on this system presents an application chooser instead.
+    auto *process = new QProcess(this);
+    process->setProgram(QStringLiteral("gio"));
+    process->setArguments({QStringLiteral("open"), file.canonicalFilePath()});
+    connect(process, &QProcess::errorOccurred, this, [this, process, path](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart) return;
+        setError(QStringLiteral("Could not open with the default application: ") + path
+                 + QStringLiteral(": ") + process->errorString());
+        process->deleteLater();
+    });
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, process, path](int exitCode, QProcess::ExitStatus status) {
+        if (status != QProcess::NormalExit || exitCode != 0)
+            setError(QStringLiteral("Could not open with the default application: ") + path
+                     + QStringLiteral(": ") + QString::fromUtf8(process->readAllStandardError()).trimmed());
+        process->deleteLater();
+    });
+    process->start();
+}
+
 bool Controller::writeCurrent(const QString &path)
 {
     auto *document = current();
@@ -778,6 +652,47 @@ void Controller::redo()
     rebuildBlocks();
 }
 
+QObject *Controller::prepareVisual(QObject *quickDocument, const QString &)
+{
+    auto *wrapper=qobject_cast<QQuickTextDocument *>(quickDocument);
+    if (!wrapper || !wrapper->textDocument()) return nullptr;
+    auto *doc=wrapper->textDocument();
+    if (auto *visual=SourceVisual::get(doc)) return visual;
+    const auto highlighters=doc->findChildren<QSyntaxHighlighter *>(QString(),Qt::FindDirectChildrenOnly);
+    for(auto *highlighter:highlighters) delete highlighter;
+    doc->setProperty("decorated",false);
+    return new SourceVisual(doc);
+}
+
+QString Controller::visualSource(QObject *quickDocument) const
+{
+    auto *wrapper=qobject_cast<QQuickTextDocument *>(quickDocument);
+    return wrapper && wrapper->textDocument() ? documentSource(wrapper->textDocument()) : QString();
+}
+
+int Controller::visualOffset(QObject *, int position) const { return position; }
+
+int Controller::sourcePosition(int block,int position) const
+{
+    if(!current() || block<0 || block>=m_sourceBlocks.size()) return position;
+    QString prefix=QString::fromUtf8(current()->source.left(m_sourceBlocks[block].start));
+    prefix.replace("\r\n","\n"); prefix.replace('\r','\n');
+    return prefix.size()+position;
+}
+
+QVariantMap Controller::visualPosition(int position) const
+{
+    for(int i=0;i<m_sourceBlocks.size();++i) {
+        const int start=sourcePosition(i,0);
+        const int stop=i+1<m_sourceBlocks.size() ? sourcePosition(i+1,0) : sourceText().size()+1;
+        if(position>=start && position<stop) {
+            if(m_sourceBlocks[i].tableIndex>=0) return {{"table",m_sourceBlocks[i].tableIndex}};
+            return {{"block",i},{"caret",position-start}};
+        }
+    }
+    return {{"block",0},{"caret",0}};
+}
+
 void Controller::editTextBlock(int block, const QString &text)
 {
     auto *document = current();
@@ -791,226 +706,119 @@ void Controller::editTextBlock(int block, const QString &text)
     if (item.tableIndex >= 0)
         return;
     QByteArray source = document->source;
-    source.replace(item.start, item.end - item.start, text.toUtf8());
-    changeSource(source);
-}
-
-void Controller::editFormattedBlock(int block, const QString &html)
-{
-    if (!markdown())
-        return;
-    QString replacement = markdownFromRichHtml(html);
-    const auto *document = current();
-    if (!document || block < 0 || block >= m_sourceBlocks.size())
-        return;
-    const SourceBlock item = m_sourceBlocks[block];
-    if (item.tableIndex >= 0)
-        return;
-    const QString original = QString::fromUtf8(document->source.mid(item.start, item.end - item.start));
-    int leadingNewlines = 0;
-    while (leadingNewlines < original.size() && original[leadingNewlines] == QLatin1Char('\n'))
-        ++leadingNewlines;
-    int trailingNewlines = 0;
-    while (trailingNewlines < original.size() && original[original.size() - trailingNewlines - 1] == QLatin1Char('\n'))
-        ++trailingNewlines;
-    while (replacement.endsWith(QLatin1Char('\n')))
-        replacement.chop(1);
-    while (replacement.startsWith(QLatin1Char('\n')))
-        replacement.remove(0, 1);
-    if (!original.trimmed().isEmpty()) {
-        const QString core = original.mid(leadingNewlines, original.size() - leadingNewlines - trailingNewlines);
-        replacement = mergeEditedMarkdown(core, replacement);
-        while (replacement.endsWith(QLatin1Char('\n')))
-            replacement.chop(1);
-    }
-    // The empty text block after a final table needs a paragraph separator on first edit.
-    if (original.isEmpty() && !replacement.isEmpty() && block > 0
+    const QString original = QString::fromUtf8(source.mid(item.start, item.end - item.start));
+    QString replacement = sourceEdit(original, text);
+    if (original.trimmed().isEmpty() && !replacement.trimmed().isEmpty() && block > 0
         && m_sourceBlocks[block - 1].tableIndex >= 0) {
-        int precedingNewlines = 0;
-        for (qsizetype i = item.start; i > 0 && document->source[i - 1] == '\n'; --i)
-            ++precedingNewlines;
-        leadingNewlines = qMax(0, 2 - precedingNewlines);
+        int leading = 0;
+        while (leading < replacement.size() && (replacement[leading] == '\n' || replacement[leading] == '\r')) ++leading;
+        if (leading < 2) replacement.prepend(QString(2 - leading, QLatin1Char('\n')));
     }
-    if (block == m_sourceBlocks.size() - 1 && !replacement.isEmpty()) {
-        const int emptyAtEnd = trailingEmptyParagraphs(html);
-        trailingNewlines = emptyAtEnd > 0 ? emptyAtEnd + 1 : qMin(trailingNewlines, 1);
-    }
-    replacement.prepend(QString(leadingNewlines, QLatin1Char('\n')));
-    replacement += QString(trailingNewlines, QLatin1Char('\n'));
-    editTextBlock(block, replacement);
-}
-
-void Controller::editFormattedCell(int table, int row, int col, const QString &html)
-{
-    // The cell was shown with its HTML tags swapped for markers; put the same tags back.
-    QString source;
-    for (const QVariant &block : std::as_const(m_blocks)) {
-        const QVariantMap map = block.toMap();
-        if (map.value(QStringLiteral("kind")).toString() == QLatin1String("table")
-            && map.value(QStringLiteral("tableIndex")).toInt() == table) {
-            const QVariantList rows = map.value(QStringLiteral("rows")).toList();
-            if (row >= 0 && row < rows.size()) {
-                const QVariantList cells = rows[row].toList();
-                if (col >= 0 && col < cells.size())
-                    source = cells[col].toString();
-            }
-            break;
-        }
-    }
-    QStringList tags;
-    htmlguard::protect(source, &tags);
-    QString replacement = htmlguard::restore(markdownFromRichHtml(html), tags);
-    while (replacement.endsWith(QLatin1Char('\n')))
-        replacement.chop(1);
-    editCell(table, row, col, replacement);
+    source.replace(item.start, item.end - item.start, replacement.toUtf8());
+    changeSource(source);
 }
 
 void Controller::formatSelection(QObject *quickDocument, int start, int end, const QString &style)
 {
-    auto *wrapper = qobject_cast<QQuickTextDocument *>(quickDocument);
-    if (!wrapper || !wrapper->textDocument() || start < 0 || end <= start)
-        return;
-    QTextCursor cursor(wrapper->textDocument());
-    cursor.setPosition(start);
-    cursor.setPosition(end, QTextCursor::KeepAnchor);
-    QTextCharFormat format;
-    if (style == QStringLiteral("bold"))
-        format.setFontWeight(cursor.charFormat().fontWeight() >= QFont::Bold ? QFont::Normal : QFont::Bold);
-    else if (style == QStringLiteral("italic"))
-        format.setFontItalic(!cursor.charFormat().fontItalic());
-    else
-        return;
-    cursor.mergeCharFormat(format);
+    auto *wrapper=qobject_cast<QQuickTextDocument *>(quickDocument);
+    if(!wrapper || end<=start) return;
+    auto *doc=wrapper->textDocument();
+    const QString mark=style=="bold" ? "**" : "*";
+    const QString source=documentSource(doc);
+    if(start>=mark.size() && source.mid(start-mark.size(),mark.size())==mark && source.mid(end,mark.size())==mark) {
+        start-=mark.size(); end+=mark.size();
+    }
+    QTextCursor cursor(doc); cursor.setPosition(start); cursor.setPosition(end,QTextCursor::KeepAnchor);
+    QString text=source.mid(start,end-start);
+    cursor.beginEditBlock();
+    if(text.startsWith(mark) && text.endsWith(mark) && text.size()>=2*mark.size())
+        cursor.insertText(text.mid(mark.size(),text.size()-2*mark.size()),QTextCharFormat());
+    else cursor.insertText(mark+text+mark,QTextCharFormat());
+    cursor.endEditBlock();
 }
 
-bool Controller::styleAtCursor(QObject *quickDocument, int position, const QString &style) const
+bool Controller::styleAtCursor(QObject *, int, const QString &) const { return false; }
+
+int Controller::insertStyledText(QObject *quickDocument,int start,int end,const QString &text,bool bold,bool italic)
 {
-    auto *wrapper = qobject_cast<QQuickTextDocument *>(quickDocument);
-    if (!wrapper || !wrapper->textDocument())
-        return false;
-    QTextCursor cursor(wrapper->textDocument());
-    cursor.setPosition(qBound(0, position, wrapper->textDocument()->characterCount() - 1));
-    const QTextCharFormat format = cursor.charFormat();
-    return style == QStringLiteral("bold") ? format.fontWeight() >= QFont::Bold : format.fontItalic();
+    auto *wrapper=qobject_cast<QQuickTextDocument *>(quickDocument);
+    if(!wrapper) return start;
+    QTextCursor cursor(wrapper->textDocument()); cursor.setPosition(start); cursor.setPosition(end,QTextCursor::KeepAnchor);
+    const QString marker=QString(bold ? "**" : "")+(italic ? "*" : "");
+    cursor.beginEditBlock(); cursor.insertText(marker+text+marker,QTextCharFormat()); cursor.endEditBlock(); return cursor.position()-marker.size();
 }
 
-int Controller::insertStyledText(QObject *quickDocument, int start, int end, const QString &text,
-                                 bool bold, bool italic)
+int Controller::applyHeadingShortcut(QObject *, int) { return -1; }
+
+int Controller::endHeading(QObject *quickDocument,int position)
 {
-    auto *wrapper = qobject_cast<QQuickTextDocument *>(quickDocument);
-    if (!wrapper || !wrapper->textDocument())
-        return start;
-    QTextDocument *document = wrapper->textDocument();
-    QTextCursor cursor(document);
-    cursor.setPosition(qBound(0, start, document->characterCount() - 1));
-    cursor.setPosition(qBound(0, end, document->characterCount() - 1), QTextCursor::KeepAnchor);
-    QTextCharFormat format = cursor.charFormat();
-    format.setFontWeight(bold ? QFont::Bold : QFont::Normal);
-    format.setFontItalic(italic);
-    cursor.insertText(text, format);
+    auto *wrapper=qobject_cast<QQuickTextDocument *>(quickDocument);
+    if(!wrapper) return -1;
+    QTextCursor cursor(wrapper->textDocument()); cursor.setPosition(position);
+    const QString source=documentSource(wrapper->textDocument());
+    const int lineStart=position>0 ? source.lastIndexOf('\n',position-1)+1 : 0;
+    const int next=source.indexOf('\n',position);
+    const QString text=source.mid(lineStart,(next<0 ? source.size() : next)-lineStart);
+    const QString before=source.mid(lineStart,position-lineStart);
+    // Don't continue Markdown-looking text inside fenced code, raw HTML or math.
+    auto *visual=SourceVisual::get(wrapper->textDocument());
+    if(visual) for(const auto &v:visual->decorations()) {
+        const auto n=v.toMap();
+        if(n.value("kind")=="background" && !n.value("quote").toBool()
+           && position>=n.value("from").toInt() && position<=n.value("to").toInt()) return -1;
+    }
+    const auto list=QRegularExpression(QStringLiteral(R"(^([ \t]*)(?:(>)[ ]?|([-+*]|[0-9]+[.)])[ ]+)(\[[ xX]\][ ]+)?(.*)$)")).match(before);
+    if(!list.hasMatch()) return -1;
+    const QString content=list.captured(5);
+    if(content.trimmed().isEmpty() && position==lineStart+text.size()) {
+        cursor.setPosition(lineStart,QTextCursor::KeepAnchor); cursor.removeSelectedText(); return cursor.position();
+    }
+    QString marker=list.captured(2).isEmpty() ? list.captured(3) : ">";
+    if(!marker.isEmpty() && marker[0].isDigit()) {
+        const QChar ending=marker.back(); marker=QString::number(marker.chopped(1).toInt()+1)+ending;
+    }
+    cursor.insertText("\n"+list.captured(1)+marker+" "+(list.captured(4).isEmpty() ? "" : "[ ] "));
     return cursor.position();
 }
 
-int Controller::applyHeadingShortcut(QObject *quickDocument, int position)
+void Controller::toggleList(QObject *quickDocument,int start,int end,bool numbered)
 {
-    auto *wrapper = qobject_cast<QQuickTextDocument *>(quickDocument);
-    if (!wrapper || !wrapper->textDocument())
-        return -1;
-    QTextDocument *document = wrapper->textDocument();
-    QTextCursor cursor(document);
-    cursor.setPosition(qBound(0, position, document->characterCount() - 1));
-    const QTextBlock block = cursor.block();
-    const QString text = block.text();
-    static const QRegularExpression hashes(QStringLiteral("^#{1,6}$"));
-    if (position - block.position() != text.size() || !hashes.match(text).hasMatch())
-        return -1;
-    // Take the look of a heading from Qt's own Markdown importer so edits and reloads agree.
-    QTextDocument reference;
-    reference.setMarkdown(QString(text.size(), QLatin1Char('#')) + QStringLiteral(" x"));
-    const QTextBlock headingBlock = reference.firstBlock();
-    QTextBlockFormat blockFormat = headingBlock.blockFormat();
-    const QTextCharFormat charFormat = headingBlock.begin().fragment().charFormat();
-    blockFormat.setTopMargin(block == document->begin() ? 4 : 16);
-    blockFormat.setBottomMargin(10);
-    cursor.setPosition(block.position());
-    cursor.setPosition(block.position() + text.size(), QTextCursor::KeepAnchor);
-    cursor.removeSelectedText();
-    cursor.setBlockFormat(blockFormat);
-    cursor.setBlockCharFormat(charFormat);
-    cursor.setCharFormat(charFormat);
-    return cursor.position();
+    auto *wrapper=qobject_cast<QQuickTextDocument *>(quickDocument); if(!wrapper) return;
+    auto *doc=wrapper->textDocument(); QTextCursor cursor(doc);
+    const QString source=documentSource(doc);
+    const int first=start>0 ? source.lastIndexOf('\n',start-1)+1 : 0;
+    int last=source.indexOf('\n',qMax(start,end-1));
+    if(last<0) last=source.size();
+    cursor.setPosition(first); cursor.setPosition(last,QTextCursor::KeepAnchor);
+    QStringList lines=source.mid(first,last-first).split('\n');
+    const QRegularExpression marker(QStringLiteral(R"(^([ \t]*)(?:[-+*]|[0-9]+[.)]) )"));
+    bool remove=true; for(const auto &line:lines) remove &= marker.match(line).hasMatch();
+    for(int i=0;i<lines.size();++i) {
+        const auto m=marker.match(lines[i]);
+        if(remove) lines[i].remove(m.captured(1).size(),m.capturedLength()-m.captured(1).size());
+        else { const int indent=QRegularExpression("^[ \\t]*").match(lines[i]).capturedLength();
+            lines[i].insert(indent,numbered ? QString::number(i+1)+". " : "- "); }
+    }
+    cursor.insertText(lines.join('\n'),QTextCharFormat());
 }
 
-int Controller::endHeading(QObject *quickDocument, int position)
+int Controller::insertLink(QObject *quickDocument,int start,int end,const QString &url,const QString &label,const QColor &)
 {
-    auto *wrapper = qobject_cast<QQuickTextDocument *>(quickDocument);
-    if (!wrapper || !wrapper->textDocument())
-        return -1;
-    QTextDocument *document = wrapper->textDocument();
-    QTextCursor cursor(document);
-    cursor.setPosition(qBound(0, position, document->characterCount() - 1));
-    const QTextBlock block = cursor.block();
-    if (block.blockFormat().headingLevel() == 0 || position - block.position() != block.text().size()
-        || block.text().isEmpty())
-        return -1;
-    QTextBlockFormat paragraph;
-    paragraph.setTopMargin(0);
-    paragraph.setBottomMargin(9);
-    cursor.insertBlock(paragraph, QTextCharFormat());
-    return cursor.position();
+    auto *wrapper=qobject_cast<QQuickTextDocument *>(quickDocument); if(!wrapper || url.isEmpty()) return start;
+    QTextCursor cursor(wrapper->textDocument()); cursor.setPosition(start); cursor.setPosition(end,QTextCursor::KeepAnchor);
+    QString title=label.isEmpty() ? (cursor.hasSelection() ? documentSource(wrapper->textDocument()).mid(start,end-start) : url) : label;
+    title.replace("[","\\["); title.replace("]","\\]");
+    QString target=url; target.replace(" ","%20"); target.replace("(","%28"); target.replace(")","%29");
+    cursor.beginEditBlock(); cursor.insertText("["+title+"]("+target+")",QTextCharFormat()); cursor.endEditBlock(); return cursor.position();
 }
 
-void Controller::toggleList(QObject *quickDocument, int start, int end, bool numbered)
+int Controller::insertImage(QObject *quickDocument,int start,int end,const QString &url,const QString &altText)
 {
-    auto *wrapper = qobject_cast<QQuickTextDocument *>(quickDocument);
-    if (!wrapper || !wrapper->textDocument())
-        return;
-    QTextDocument *document = wrapper->textDocument();
-    QTextCursor cursor(document);
-    cursor.setPosition(qBound(0, start, document->characterCount() - 1));
-    cursor.setPosition(qBound(0, end, document->characterCount() - 1), QTextCursor::KeepAnchor);
-    const auto style = numbered ? QTextListFormat::ListDecimal : QTextListFormat::ListDisc;
-    if (QTextList *list = cursor.currentList(); list && list->format().style() == style)
-        list->remove(cursor.block());
-    else
-        cursor.createList(style);
-}
-
-int Controller::insertLink(QObject *quickDocument, int start, int end, const QString &url,
-                           const QString &label, const QColor &color)
-{
-    auto *wrapper = qobject_cast<QQuickTextDocument *>(quickDocument);
-    if (!wrapper || !wrapper->textDocument() || url.isEmpty())
-        return start;
-    QTextDocument *document = wrapper->textDocument();
-    QTextCursor cursor(document);
-    cursor.setPosition(qBound(0, start, document->characterCount() - 1));
-    cursor.setPosition(qBound(0, end, document->characterCount() - 1), QTextCursor::KeepAnchor);
-    QTextCharFormat format = cursor.charFormat();
-    format.setAnchor(true);
-    format.setAnchorHref(url);
-    format.setForeground(color);
-    format.setFontUnderline(true);
-    const QString display = label.isEmpty() ? (cursor.hasSelection() ? cursor.selectedText() : url) : label;
-    cursor.insertText(display, format);
-    return cursor.position();
-}
-
-int Controller::insertImage(QObject *quickDocument, int start, int end, const QString &url,
-                            const QString &altText)
-{
-    auto *wrapper = qobject_cast<QQuickTextDocument *>(quickDocument);
-    if (!wrapper || !wrapper->textDocument() || url.isEmpty())
-        return start;
-    QTextDocument *document = wrapper->textDocument();
-    QTextCursor cursor(document);
-    cursor.setPosition(qBound(0, start, document->characterCount() - 1));
-    cursor.setPosition(qBound(0, end, document->characterCount() - 1), QTextCursor::KeepAnchor);
-    QTextImageFormat format;
-    format.setName(url);
-    format.setProperty(QTextFormat::ImageAltText, altText);
-    cursor.insertImage(format);
-    return cursor.position();
+    auto *wrapper=qobject_cast<QQuickTextDocument *>(quickDocument); if(!wrapper || url.isEmpty()) return start;
+    QTextCursor cursor(wrapper->textDocument()); cursor.setPosition(start); cursor.setPosition(end,QTextCursor::KeepAnchor);
+    QString alt=altText; alt.replace("[","\\["); alt.replace("]","\\]");
+    QString target=url; target.replace(" ","%20"); target.replace("(","%28"); target.replace(")","%29");
+    cursor.beginEditBlock(); cursor.insertText("!["+alt+"]("+target+")",QTextCharFormat()); cursor.endEditBlock(); return cursor.position();
 }
 
 void Controller::editCell(int table, int row, int col, const QString &text)
@@ -1018,6 +826,7 @@ void Controller::editCell(int table, int row, int col, const QString &text)
     const auto *document = current();
     if (!document || table < 0 || row < 0 || col < 0)
         return;
+    if (text.contains(QChar::Null)) { setError(QStringLiteral("Text files cannot contain NUL characters.")); return; }
     const QByteArray replacement = text.toUtf8();
     char *edited = kern_replace_cell(document->source.constData(), table, row, col, replacement.constData());
     if (edited)
@@ -1086,49 +895,10 @@ int Controller::insertTable(int block, int cursorUtf16, int rows, int cols)
     if (item.tableIndex >= 0)
         return -1;
     const QString original = QString::fromUtf8(document->source.mid(item.start, item.end - item.start));
-    const qsizetype position = item.start + original.left(qBound(0, cursorUtf16, original.size())).toUtf8().size();
+    const qsizetype position = item.start + original.left(sourceOffset(original, qMax(0, cursorUtf16))).toUtf8().size();
     const QByteArray table = takeRustString(kern_new_table(rows, cols));
     QByteArray source = document->source;
     source.insert(position, QByteArray("\n\n") + table + QByteArray("\n\n"));
-    return applyTableInsertion(source);
-}
-
-int Controller::insertTableAtVisualCursor(int block, int cursorPosition, int rows, int cols)
-{
-    const auto *document = current();
-    if (!document || !markdown() || block < 0 || block >= m_sourceBlocks.size()
-        || rows < 1 || cols < 1 || rows > 100 || cols > 30)
-        return -1;
-    const SourceBlock item = m_sourceBlocks[block];
-    if (item.tableIndex >= 0)
-        return -1;
-    const QString original = QString::fromUtf8(document->source.mid(item.start, item.end - item.start));
-    QTextDocument before;
-    before.setMarkdown(original);
-    QTextDocument after;
-    after.setMarkdown(original);
-    const int position = qBound(0, cursorPosition, before.characterCount() - 1);
-    QTextCursor beforeCursor(&before);
-    beforeCursor.setPosition(position);
-    beforeCursor.movePosition(QTextCursor::End, QTextCursor::KeepAnchor);
-    beforeCursor.removeSelectedText();
-    QTextCursor afterCursor(&after);
-    afterCursor.setPosition(position);
-    afterCursor.setPosition(0, QTextCursor::KeepAnchor);
-    afterCursor.removeSelectedText();
-    const QString left = before.toMarkdown(QTextDocument::MarkdownDialectGitHub).trimmed();
-    const QString right = after.toMarkdown(QTextDocument::MarkdownDialectGitHub).trimmed();
-    const QString table = QString::fromUtf8(takeRustString(kern_new_table(rows, cols))).trimmed();
-    QString replacement;
-    if (!left.isEmpty())
-        replacement += left + QStringLiteral("\n\n");
-    else if (item.start > 0)
-        replacement += QStringLiteral("\n\n");
-    replacement += table + QStringLiteral("\n\n");
-    if (!right.isEmpty())
-        replacement += right + QLatin1Char('\n');
-    QByteArray source = document->source;
-    source.replace(item.start, item.end - item.start, replacement.toUtf8());
     return applyTableInsertion(source);
 }
 
@@ -1138,7 +908,7 @@ int Controller::insertTableAtSourceCursor(int cursorUtf16, int rows, int cols)
     if (!document || rows < 1 || cols < 1 || rows > 100 || cols > 30)
         return -1;
     const QString original = QString::fromUtf8(document->source);
-    const qsizetype position = original.left(qBound(0, cursorUtf16, original.size())).toUtf8().size();
+    const qsizetype position = original.left(sourceOffset(original, qMax(0, cursorUtf16))).toUtf8().size();
     const QByteArray table = takeRustString(kern_new_table(rows, cols));
     QByteArray source = document->source;
     source.insert(position, QByteArray("\n\n") + table + QByteArray("\n\n"));
@@ -1166,7 +936,7 @@ void Controller::setSourceText(const QString &text)
         setError(QStringLiteral("Text files cannot contain NUL characters."));
         return;
     }
-    changeSource(text.toUtf8());
+    changeSource(sourceEdit(sourceText(), text).toUtf8());
 }
 
 void Controller::openLink(const QString &link)

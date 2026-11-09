@@ -1,5 +1,7 @@
+#include "syntaxhighlighter.h"
+#include "sourcevisual.h"
+#include <QQuickTextDocument>
 #include "theme.h"
-#include "htmlguard.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -81,42 +83,6 @@ void UiTheme::setZoomPercent(int percent)
 void UiTheme::zoomIn() { setZoomPercent(m_zoomPercent + 10); }
 void UiTheme::zoomOut() { setZoomPercent(m_zoomPercent - 10); }
 void UiTheme::resetZoom() { setZoomPercent(100); }
-
-QString UiTheme::markdownHtml(const QString &source, const QColor &linkColor,
-                              const QString &fontFamily, int zoomPercent) const
-{
-    QTextDocument document;
-    // The document is built with a non-monospace default so that inline code keeps an explicit
-    // monospace family, which the Markdown exporter needs to write backticks. The real font is
-    // put back on the body afterwards.
-    QFont font(QStringLiteral("Sans Serif"));
-    font.setPixelSize(qRound(15.0 * zoomPercent / 100.0));
-    document.setDefaultFont(font);
-    document.setDefaultStyleSheet(QStringLiteral("a { color: %1; }").arg(linkColor.name()));
-    QStringList tags;
-    document.setMarkdown(htmlguard::protect(source, &tags));
-    for (QTextBlock block = document.begin(); block.isValid(); block = block.next()) {
-        QTextBlockFormat format = block.blockFormat();
-        const QTextBlock next = block.next();
-        const bool followedByListItem = block.textList() && next.isValid()
-            && next.textList() == block.textList();
-        format.setBottomMargin(followedByListItem ? 2 : format.headingLevel() > 0 ? 10 : 9);
-        if (block.textList())
-            format.setTopMargin(0);
-        if (format.headingLevel() > 0)
-            format.setTopMargin(block == document.begin() ? 4 : 16);
-        QTextCursor cursor(block);
-        cursor.setBlockFormat(format);
-    }
-    QString html = document.toHtml();
-    html.replace(QStringLiteral("<body style=\" font-family:'Sans Serif';"),
-                 QStringLiteral("<body style=\" font-family:'%1';").arg(fontFamily));
-    html.replace(QRegularExpression(QStringLiteral("<a\\b")),
-                 QStringLiteral("<a style=\"color:%1\"").arg(linkColor.name()));
-    html.replace(QStringLiteral("color:#0000ff;"),
-                 QStringLiteral("color:%1;").arg(linkColor.name()));
-    return html;
-}
 
 bool UiTheme::eventFilter(QObject *watched, QEvent *event)
 {
@@ -207,4 +173,16 @@ void UiTheme::reload()
     const QString omarchy = QStandardPaths::findExecutable(QStringLiteral("omarchy"));
     if (!omarchy.isEmpty() && m_fontProcess.state() == QProcess::NotRunning)
         m_fontProcess.start(omarchy, {QStringLiteral("font"), QStringLiteral("current")});
+}
+
+void UiTheme::decorate(QObject *quickDocument)
+{
+    auto *wrapper = qobject_cast<QQuickTextDocument *>(quickDocument);
+    if (!wrapper || !wrapper->textDocument()) return;
+    auto *document = wrapper->textDocument();
+    if(auto *visual=SourceVisual::get(document)) { delete visual; document->setProperty("decorated",false); }
+    document->setProperty("sourceSyntax", true);
+    if (document->property("decorated").toBool()) return;
+    document->setProperty("decorated", true);
+    new SyntaxHighlighter(document, accent(), muted(), surface());
 }

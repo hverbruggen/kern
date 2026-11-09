@@ -1,6 +1,13 @@
 #[allow(dead_code)] // the app uses only part of the shared table API
 #[path = "../../../core/src/table.rs"]
 mod table;
+mod markdown;
+
+#[no_mangle]
+pub extern "C" fn kern_markdown_spans(source: *const c_char) -> *mut c_char {
+    let Some(source) = from_c(source) else { return std::ptr::null_mut(); };
+    into_c(serde_json::to_string(&markdown::spans(&source)).unwrap_or_default())
+}
 
 use std::ffi::{c_char, CStr, CString};
 

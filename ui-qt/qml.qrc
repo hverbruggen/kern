@@ -1,6 +1,9 @@
 <RCC>
   <qresource prefix="/qt">
     <file>main.qml</file>
+    <file>SourceDecorations.qml</file>
+    <file alias="kern-hidden.ttf">fonts/kern-hidden.ttf</file>
+    <file alias="kern-spacer.ttf">fonts/kern-spacer.ttf</file>
     <file alias="kern-icons.ttf">fonts/kern-icons.ttf</file>
   </qresource>
 </RCC>

@@ -22,6 +22,7 @@ struct UndoStep {
 
 struct OpenDocument {
     QString path;
+    QVariantMap caret;
     QByteArray source;
     QByteArray savedSource;
     QVector<UndoStep> undo;
@@ -56,6 +57,7 @@ class Controller : public QObject {
     Q_PROPERTY(QString error READ error NOTIFY errorChanged)
     Q_PROPERTY(QString unsupportedFilePath READ unsupportedFilePath NOTIFY unsupportedFileChanged)
     Q_PROPERTY(QString unsupportedFileMessage READ unsupportedFileMessage NOTIFY unsupportedFileChanged)
+    Q_PROPERTY(QVariantMap currentCaret READ currentCaret NOTIFY tabsChanged)
 public:
     explicit Controller(QObject *parent = nullptr);
     QVariantList tabs() const;
@@ -78,6 +80,7 @@ public:
     QString error() const { return m_error; }
     QString unsupportedFilePath() const { return m_unsupportedFilePath; }
     QString unsupportedFileMessage() const { return m_unsupportedFileMessage; }
+    QVariantMap currentCaret() const { return current() ? current()->caret : QVariantMap(); }
 
     Q_INVOKABLE void newDocument();
     Q_INVOKABLE bool openUrl(const QUrl &url) { return url.isLocalFile() && openPath(url.toLocalFile()); }
@@ -106,14 +109,20 @@ public:
     Q_INVOKABLE void activateProjectEntry(int index);
     Q_INVOKABLE void selectTab(int index);
     Q_INVOKABLE bool closeTab(int index, bool discard = false);
+    Q_INVOKABLE void rememberCaret(const QVariantMap &caret) { if (auto *document = current()) document->caret = caret; }
+    Q_INVOKABLE void openWithChooser(const QString &path);
+    Q_INVOKABLE void openWithDefault(const QString &path);
     Q_INVOKABLE bool save();
     Q_INVOKABLE bool saveAsUrl(const QUrl &url) { return url.isLocalFile() && writeCurrent(url.toLocalFile()); }
     Q_INVOKABLE bool reloadCurrent(bool discard = false);
     Q_INVOKABLE void undo();
     Q_INVOKABLE void redo();
+    Q_INVOKABLE QObject *prepareVisual(QObject *quickDocument, const QString &source);
+    Q_INVOKABLE QString visualSource(QObject *quickDocument) const;
+    Q_INVOKABLE int visualOffset(QObject *quickDocument, int position) const;
+    Q_INVOKABLE int sourcePosition(int block, int position) const;
+    Q_INVOKABLE QVariantMap visualPosition(int position) const;
     Q_INVOKABLE void editTextBlock(int block, const QString &text);
-    Q_INVOKABLE void editFormattedBlock(int block, const QString &html);
-    Q_INVOKABLE void editFormattedCell(int table, int row, int col, const QString &html);
     Q_INVOKABLE void formatSelection(QObject *quickDocument, int start, int end, const QString &style);
     Q_INVOKABLE bool styleAtCursor(QObject *quickDocument, int position, const QString &style) const;
     Q_INVOKABLE int insertStyledText(QObject *quickDocument, int start, int end, const QString &text,
@@ -134,7 +143,6 @@ public:
     Q_INVOKABLE void tableCommand(int table, const QString &command, int row, int col);
     // The insert functions return the index of the new table, or -1 when nothing was inserted.
     Q_INVOKABLE int insertTable(int block, int cursorUtf16, int rows, int cols);
-    Q_INVOKABLE int insertTableAtVisualCursor(int block, int cursorPosition, int rows, int cols);
     Q_INVOKABLE int insertTableAtSourceCursor(int cursorUtf16, int rows, int cols);
     Q_INVOKABLE int insertTableAfterTable(int tableIndex, int rows, int cols);
     Q_INVOKABLE void setSourceText(const QString &text);

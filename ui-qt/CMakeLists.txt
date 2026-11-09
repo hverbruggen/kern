@@ -8,6 +8,24 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2)
+include(FetchContent)
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
+FetchContent_Declare(microtex
+    URL https://codeload.github.com/NanoMichael/MicroTeX/tar.gz/0e3707f6dafebb121d98b53c64364d16fefe481d
+    URL_HASH SHA256=47476269d29c41df322bce6bdd2daa7017cc50b9eda841b2bec1767dba28daa6
+    SOURCE_SUBDIR kern-unused-upstream-build)
+FetchContent_MakeAvailable(microtex)
+find_package(tinyxml2 REQUIRED)
+file(GLOB_RECURSE MICROTEX_SOURCES CONFIGURE_DEPENDS "${microtex_SOURCE_DIR}/src/*.cpp")
+list(FILTER MICROTEX_SOURCES EXCLUDE REGEX "/(samples|platform)/")
+add_library(kern_math STATIC ${MICROTEX_SOURCES} microtex_qt.cpp)
+target_include_directories(kern_math PUBLIC "${microtex_SOURCE_DIR}/src")
+target_compile_definitions(kern_math PUBLIC BUILD_QT)
+target_link_libraries(kern_math PUBLIC Qt6::Gui tinyxml2::tinyxml2)
+file(COPY "${microtex_SOURCE_DIR}/res/" DESTINATION "${CMAKE_BINARY_DIR}/share/kern/microtex")
+file(COPY "${microtex_SOURCE_DIR}/LICENSE" DESTINATION "${CMAKE_BINARY_DIR}/share/kern/microtex")
 
 set(BRIDGE_LIBRARY "${CMAKE_BINARY_DIR}/bridge/release/libkern_qt_bridge.a")
 add_custom_command(
@@ -16,6 +34,7 @@ add_custom_command(
             --manifest-path "${CMAKE_CURRENT_SOURCE_DIR}/bridge/Cargo.toml"
             --target-dir "${CMAKE_BINARY_DIR}/bridge"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/bridge/src/lib.rs"
+            "${CMAKE_CURRENT_SOURCE_DIR}/bridge/src/markdown.rs"
             "${CMAKE_CURRENT_SOURCE_DIR}/bridge/Cargo.toml"
             "${CMAKE_CURRENT_SOURCE_DIR}/bridge/Cargo.lock"
             "${CMAKE_CURRENT_SOURCE_DIR}/../core/src/table.rs"
@@ -25,8 +44,8 @@ add_custom_command(
 add_custom_target(kern_qt_bridge DEPENDS "${BRIDGE_LIBRARY}")
 
 # Shared by the app and the development checks.
-add_library(kern_shared OBJECT controller.cpp controller.h theme.cpp theme.h qml.qrc)
-target_link_libraries(kern_shared PUBLIC Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
+add_library(kern_shared OBJECT controller.cpp controller.h theme.cpp theme.h sourcevisual.cpp sourcevisual.h mathrenderer.cpp mathrenderer.h qml.qrc)
+target_link_libraries(kern_shared PUBLIC kern_math Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2)
 add_dependencies(kern_shared kern_qt_bridge)
 
 add_executable(kern main.cpp)
@@ -39,6 +58,7 @@ target_link_libraries(kern-checks PRIVATE kern_shared "${BRIDGE_LIBRARY}" dl pth
 target_compile_definitions(kern-checks PRIVATE KERN_WITH_CHECKS KERN_QT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 install(TARGETS kern RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(DIRECTORY "${CMAKE_BINARY_DIR}/share/kern/microtex" DESTINATION "${CMAKE_INSTALL_DATADIR}/kern")
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../packaging/io.github.hverbruggen.kern.desktop"
         DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/applications")
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../packaging/io.github.hverbruggen.kern.svg"

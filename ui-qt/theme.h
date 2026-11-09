@@ -31,12 +31,11 @@ public:
     QColor selection() const { return m_selection; }
     QString monoFont() const { return m_monoFont; }
     int zoomPercent() const { return m_zoomPercent; }
+    Q_INVOKABLE void decorate(QObject *quickDocument);
     Q_INVOKABLE void zoomIn();
     Q_INVOKABLE void zoomOut();
     Q_INVOKABLE void resetZoom();
     Q_INVOKABLE void setZoomPercent(int percent);
-    Q_INVOKABLE QString markdownHtml(const QString &source, const QColor &linkColor,
-                                     const QString &fontFamily, int zoomPercent) const;
 
 signals:
     void changed();
