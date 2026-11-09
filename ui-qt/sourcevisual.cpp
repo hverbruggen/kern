@@ -32,8 +32,11 @@ QString documentSource(const QTextDocument *doc)
         for(auto it=block.begin();!it.atEnd();++it) {
             const auto fragment=it.fragment();
             if(fragment.charFormat().objectType()!=SoftBreakSpace::Type) continue;
+            const auto format=fragment.charFormat();
+            const QChar original=format.hasProperty(SoftBreakSpace::OriginalCharacter)
+                ? QChar(format.intProperty(SoftBreakSpace::OriginalCharacter)) : QChar('\n');
             for(int i=fragment.position();i<fragment.position()+fragment.length();++i)
-                if(text[i]==QChar::ObjectReplacementCharacter) text[i]=QLatin1Char('\n');
+                if(text[i]==QChar::ObjectReplacementCharacter) text[i]=original;
         }
     }
     return text;
@@ -41,6 +44,7 @@ QString documentSource(const QTextDocument *doc)
 
 QSizeF SoftBreakSpace::intrinsicSize(QTextDocument *doc,int,const QTextFormat &format)
 {
+    if(format.hasProperty(OriginalCharacter) && format.intProperty(OriginalCharacter)!='\n') return {0,0};
     const QFont font=format.toCharFormat().font().resolve(doc->defaultFont());
     const QFontMetricsF metrics(font);
     return {metrics.horizontalAdvance(QLatin1Char(' ')), metrics.height()};
@@ -151,13 +155,21 @@ void SourceVisual::projectSoftBreaks()
     QSet<int> breaks;
     if(preview) for(const auto &value:nodes) {
         const auto node=value.toObject();
-        if(node["kind"]=="softbreak") breaks.insert(node["from"].toInt());
+        if(node["kind"]=="softbreak") {
+            breaks.insert(node["from"].toInt());
+            // Tabs use Qt's tab stops even with a zero-advance font. Project
+            // continuation padding as zero-width objects and retain each source
+            // character in its format, just as we retain the soft newline.
+            for(const auto &mark:node["marks"].toArray()) {
+                const auto range=mark.toArray();
+                for(int i=range[0].toInt();i<range[1].toInt();++i) breaks.insert(i);
+            }
+        }
     }
     const QString raw=document()->toRawText();
     QVector<int> changes;
     for(int i=0;i<source.size();++i) {
-        if(source[i]!='\n') continue;
-        const bool projected=raw[i]==QChar::ObjectReplacementCharacter;
+        const bool projected=raw[i]==QChar::ObjectReplacementCharacter && source[i]!=QChar::ObjectReplacementCharacter;
         if(projected!=breaks.contains(i)) changes.append(i);
     }
     if(changes.isEmpty()) return;
@@ -174,8 +186,9 @@ void SourceVisual::projectSoftBreaks()
         QTextCharFormat format;
         if(breaks.contains(*it)) {
             format.setObjectType(SoftBreakSpace::Type);
+            format.setProperty(SoftBreakSpace::OriginalCharacter,source[*it].unicode());
             cursor.insertText(QString(QChar::ObjectReplacementCharacter),format);
-        } else cursor.insertText(QStringLiteral("\n"),format);
+        } else cursor.insertText(QString(source[*it]),format);
     }
     cursor.endEditBlock();
     if(!hadUndo) document()->clearUndoRedoStacks();
@@ -208,6 +221,9 @@ void SourceVisual::refresh()
     for(const auto &value:nodes) {
         const auto n=value.toObject(); const QString kind=n["kind"].toString();
         const int a=n["from"].toInt(),b=n["to"].toInt();
+        // Padding already has zero-width objects. Applying the marker-hiding
+        // font on top would interfere with Qt's inline-object layout.
+        if(kind=="softbreak") continue;
         if(kind=="codeblock" || kind=="html" || kind=="metadata" || kind=="quote") {
             // Inline HTML gets character styling, not a full-width panel.
             if(kind!="html" || source.mid(a,b-a).contains('\n'))

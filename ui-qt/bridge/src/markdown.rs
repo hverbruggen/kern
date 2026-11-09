@@ -125,7 +125,17 @@ pub fn spans(source: &str) -> Vec<Value> {
             Event::TaskListMarker(checked) => { kind = "task"; value = checked.to_string(); }
             Event::FootnoteReference(_) => kind = "footnote",
             Event::Rule => kind = "rule",
-            Event::SoftBreak => kind = "softbreak",
+            Event::SoftBreak => {
+                kind = "softbreak";
+                // The rendered newline supplies one space. Suppress source
+                // padding around it, including continuation-line indentation.
+                let mut before = range.start;
+                while before > 0 && matches!(source.as_bytes()[before-1], b' ' | b'\t') { before -= 1; }
+                let mut after = range.end;
+                while after < source.len() && matches!(source.as_bytes()[after], b' ' | b'\t') { after += 1; }
+                mark(before, range.start);
+                mark(range.end, after);
+            }
             Event::Text(_) if opaque_depth == 0 && raw.starts_with('\\') && raw.len() > 1 => {
                 kind = "escape"; mark(range.start, range.start+1);
             }
@@ -183,5 +193,15 @@ mod tests {
         assert_eq!(breaks.len(), 1);
         assert_eq!(breaks[0]["from"], source[..source.find('\n').unwrap()].encode_utf16().count());
         assert_eq!(breaks[0]["to"].as_u64().unwrap(), breaks[0]["from"].as_u64().unwrap()+1);
+    }
+    #[test]
+    fn soft_break_padding_is_presentation_only() {
+        let source = "- one\n  two\n\nthree \n\tfour\n\ncode ` a  b `\n\nhard  \n  break\n";
+        let nodes = spans(source);
+        let breaks: Vec<_> = nodes.iter().filter(|s| s["kind"] == "softbreak").collect();
+        assert_eq!(breaks.len(), 2);
+        assert_eq!(breaks[0]["marks"], json!([[6,8]]));
+        let at = source.find(" \n\t").unwrap();
+        assert_eq!(breaks[1]["marks"], json!([[at,at+1],[at+2,at+3]]));
     }
 }

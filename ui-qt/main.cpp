@@ -61,7 +61,7 @@ int main(int argc, char **argv)
     QFontDatabase::addApplicationFont(QStringLiteral(":/qt/kern-hidden.ttf"));
     QFontDatabase::addApplicationFont(QStringLiteral(":/qt/kern-spacer.ttf"));
     app.setApplicationName(QStringLiteral("kern"));
-    app.setApplicationVersion(QStringLiteral("0.3.1"));
+    app.setApplicationVersion(QStringLiteral("0.3.2"));
     // Matches the desktop file name, so the window manager can pair windows with the launcher entry.
     app.setDesktopFileName(QStringLiteral("io.github.hverbruggen.kern"));
     const QStringList arguments = app.arguments();

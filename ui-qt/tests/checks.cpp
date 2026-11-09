@@ -13,6 +13,7 @@
 #include <QSettings>
 #include <QFile>
 #include <QFont>
+#include <QFontMetricsF>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQmlProperty>
@@ -328,7 +329,7 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
         auto *window=qobject_cast<QQuickWindow *>(engine.rootObjects().first());
         auto settle=[] { QEventLoop loop; QTimer::singleShot(80,&loop,&QEventLoop::quit); loop.exec(); };
         auto fail=[](int n,const char *why) { fprintf(stderr,"SOFT BREAK %d: %s\n",n,why); return n; };
-        const QString original=QString::fromUtf8("First café 🦉 line\nsecond line\nthird line.\n\nHard break  \nnext hard\\\nlast hard.\n\n```text\ncode one\ncode two\n```\n\n<div>\nraw HTML\n</div>\n\n- first item\n- second item\n");
+        const QString original=QString::fromUtf8("First café 🦉 line\nsecond line\nthird line.\n\nHard break  \nnext hard\\\nlast hard.\n\n```text\ncode one\ncode two\n```\n\n<div>\nraw HTML\n</div>\n\n- first item\n- second item\n  continuation\n\nPadded \n  paragraph\n\nTabbed\n\tcontinuation\n");
         QTemporaryDir folder;
         const QString path=folder.filePath("soft.md");
         const QByteArray bytes=QString(original).replace("\n","\r\n").toUtf8();
@@ -342,8 +343,38 @@ int runChecks(QGuiApplication &app, QQmlApplicationEngine &engine, Controller &c
         if(documentSource(doc)!=original || doc->isUndoAvailable() || editor->property("contentDirty").toBool()) return fail(493,"initial projection changed source/history");
         auto rect=[editor](int at) { QRectF r; QMetaObject::invokeMethod(editor,"positionToRectangle",Q_RETURN_ARG(QRectF,r),Q_ARG(int,at)); return r; };
         if(rect(0).y()!=rect(original.indexOf("second line")).y()) return fail(494,"soft break still starts a line");
+        const qreal spaceWidth=QFontMetricsF(editor->property("font").value<QFont>()).horizontalAdvance(' ');
+        for(const QString &join:QStringList{"\n  continuation"," \n  paragraph","\n\tcontinuation"}) {
+            const int from=original.indexOf(join);
+            int to=from; while(to<original.size() && original[to].isSpace()) ++to;
+            editor->forceActiveFocus(); editor->setProperty("cursorPosition",to); settle();
+            const qreal width=rect(to).x()-rect(from).x();
+            if(rect(to).y()!=rect(from).y() || qAbs(width-spaceWidth)>1) {
+                fprintf(stderr,"join=[%s] width=%f space=%f\n",qPrintable(join),width,spaceWidth);
+                for(int i=from;i<=to;++i) {
+                    QTextCursor cursor(doc); cursor.setPosition(i); cursor.setPosition(i+1,QTextCursor::KeepAnchor);
+                    fprintf(stderr,"at=%d source=%d object=%d original=%d x=%f y=%f\n",i,original[i].unicode(),cursor.charFormat().objectType(),cursor.charFormat().intProperty(SoftBreakSpace::OriginalCharacter),rect(i).x(),rect(i).y());
+                }
+                return fail(513,"continuation indentation widened the soft break");
+            }
+        }
         for(const auto &pair:QList<QPair<QString,QString>>{{"Hard break","next hard"},{"next hard","last hard"},{"code one","code two"},{"<div>","raw HTML"},{"- first","- second"}})
             if(rect(original.indexOf(pair.first)).y()>=rect(original.indexOf(pair.second)).y()) return fail(495,"structural break collapsed");
+        const int paddedBreak=original.indexOf("\n  continuation");
+        editor->setProperty("cursorPosition",paddedBreak);
+        QKeyEvent explicitBreak(QEvent::KeyPress,Qt::Key_Backslash,Qt::NoModifier,"\\");
+        QCoreApplication::sendEvent(window,&explicitBreak); settle();
+        QString expanded=original; expanded.insert(paddedBreak,'\\');
+        if(documentSource(doc)!=expanded || rect(paddedBreak+4).y()<=rect(paddedBreak).y()) return fail(514,"hard break did not restore continuation padding");
+        doc->undo(); settle(); if(documentSource(doc)!=original) return fail(515,"undo lost continuation indentation");
+        doc->redo(); settle(); if(documentSource(doc)!=expanded) return fail(516,"redo lost continuation indentation");
+        doc->undo(); settle();
+        editor->setProperty("cursorPosition",paddedBreak+1);
+        QKeyEvent indent(QEvent::KeyPress,Qt::Key_Space,Qt::NoModifier," ");
+        QCoreApplication::sendEvent(window,&indent); settle();
+        QString indented=original; indented.insert(paddedBreak+1,' ');
+        if(documentSource(doc)!=indented) return fail(517,"editing collapsed indentation changed the source");
+        doc->undo(); settle(); if(documentSource(doc)!=original) return fail(518,"undo lost a hidden source space");
         // A tiling compositor can reject top-level resize requests; constrain
         // the actual editor to test its layout on both offscreen and Wayland.
         const qreal editorWidth=editor->width();

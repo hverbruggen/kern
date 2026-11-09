@@ -18,6 +18,7 @@ class SoftBreakSpace final : public QObject, public QTextObjectInterface {
 public:
     using QObject::QObject;
     static constexpr int Type = QTextFormat::UserObject + 1;
+    static constexpr int OriginalCharacter = QTextFormat::UserProperty + 1;
     QSizeF intrinsicSize(QTextDocument *, int, const QTextFormat &) override;
     void drawObject(QPainter *, const QRectF &, QTextDocument *, int, const QTextFormat &) override {}
 };

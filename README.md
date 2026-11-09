@@ -8,11 +8,10 @@ interface to create, edit and modify tables.
 
 ## Features
 
-- Visual mode edits Markdown source with formatted headings, code, equations,
-  and tables. Syntax appears locally when the caret enters a construct.
+- Visual mode edits Markdown source with formatted headings, code, equations, and tables. Syntax appears locally when the caret enters a construct.
 - Or, if you're a purist, you can switch to source view for the raw text.
 - Click into a table cell to edit it and arrow keys and Tab to move between
-  cells.
+cells.
 - Open several files in tabs and browse a project folder in the sidebar. The
   clock button next to Open lists your ten most recent project folders.
 - Right-click a file in the sidebar to open it in its default application or
@@ -20,8 +19,7 @@ interface to create, edit and modify tables.
 - Plain text and standalone LaTeX files edit as literal source. Equations embedded
   in Markdown have native previews in Visual mode.
 - Undo and redo, atomic saves, and a warning when a file changes on disk.
-- Follows the current [Omarchy](https://omarchy.org) colors and font when
-  you're using that OS. Otherwise it uses a light default theme.
+- Follows the current [Omarchy](https://omarchy.org) colors and font when you're using that OS. Otherwise it uses a light default theme.
 
 ## Install
 
@@ -66,7 +64,9 @@ the top. Hover over any icon to see what it does and its shortcut.
 | Undo, redo | Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z |
 | Bold, italic | Ctrl+B, Ctrl+I |
 | Bulleted, numbered list | Ctrl+Shift+8, Ctrl+Shift+7 |
-| Insert link, image, table | Ctrl+Alt+K, Ctrl+Alt+I, Ctrl+Alt+T |
+| Insert link or image | Ctrl+Alt+K, Ctrl+Alt+I |
+| Insert table, then enter rows and columns | Ctrl+Alt+T |
+| Table: next cell, or add a row from the last cell | Tab |
 | Table: add row above or below | Ctrl+Alt+Up, Ctrl+Alt+Down |
 | Table: add column left or right | Ctrl+Alt+Left, Ctrl+Alt+Right |
 | Table: delete row or column | Ctrl+Alt+Shift+Up, Ctrl+Alt+Shift+Left |
@@ -74,71 +74,24 @@ the top. Hover over any icon to see what it does and its shortcut.
 | Focus the file list | Ctrl+Shift+E |
 | Zoom (30% to 200%) | Ctrl+plus, Ctrl+minus, Ctrl+0, or Ctrl+wheel |
 
-Dialogs work from the keyboard. The default button has focus, so Enter confirms
-it. Left and Right move between buttons and Esc cancels. When you close a tab
-with unsaved changes, the default is to discard them.
-
-The folder and file dialogs (open folder, new file, save as, choose image) are
-keyboard-first too. Up and Down select, Enter goes into a folder or picks a
-file, Left or Backspace goes up a level, and typing jumps to a name. Tab moves
-to the action button, Enter confirms, and Ctrl+L edits the path.
-
-In the file list, Up and Down move, Shift+Up or Shift+Down selects a range, and
-Enter opens the selected files or opens and closes a folder. Right and Left
-expand and collapse folders, and Esc returns to the document. After you open a
-project folder, the file list has the focus.
-
 Arrow keys move into and out of tables. Down on the last line above a table
 lands at the start of its first cell, and Up on the first line below a table
 lands at the start of the last row's first cell. Shift+Down or Shift+Up there
 selects the whole table instead, as does dragging the mouse from the text on
-one side across the table. Delete or Backspace then removes the table, and
-Undo brings it back.
+one side across the table. Delete or Backspace then removes the table.
 
-To insert a table from the keyboard, press Ctrl+Alt+T, type the number of rows,
-Tab, type the number of columns, Tab, and Enter. The caret lands in the first
-cell. Tab from the last table cell adds a row. Click below the last block to start
-typing at the end of the document.
+Click below the last block to type at the end of the document.
 
 ## Things to know
 
-- **Visual edits the source directly.** Markdown delimiters are hidden outside
-  the caret or selection and revealed locally while editing. Hover does not
-  reveal syntax. Ordinary source newlines flow as spaces in Visual mode, so
-  paragraphs wrap to the window width. Blank lines, explicit Markdown hard breaks,
-  code blocks, and raw HTML retain their breaks. The original source newlines are
-  preserved when editing and saving. Typing or
-  deleting backticks, emphasis, headings, links, or fences updates the formatting.
-  Copying a selection copies its source, including Markdown markers.
-- **Code stays distinguishable.** Inline code has a subtle background; fenced
-  and indented code have panels. Fences and language labels reappear while editing
-  the block. Code colouring currently uses a basic token highlighter.
-- **Equations have native previews.** MicroTeX draws inline and display math in
-  Qt, including fractions, roots, scripts, matrices, aligned equations, cases,
-  and scalable delimiters. Click a preview to select its TeX source; moving away
-  restores the preview. Invalid or unsupported equations stay visible as source
-  with a diagnostic on hover. This is a mathematical TeX subset, not full LaTeX
-  or exact KaTeX compatibility: document commands, macro definitions, and `mhchem`
-  are not supported. No external TeX process runs. Standalone `.tex` files remain
-  source editors. Markdown math uses `$...$` and `$$...$$` delimiters.
-- **Raw HTML stays source.** Tags, comments, HTML tables, and iframes are never
-  rendered. HTML attributes and comments remain editable. Markdown-looking text
-  inside an HTML block is not turned into a table widget.
-- **Tables edit source within each cell.** Merged cells and multi-line cells are
-  not supported. Pasted line breaks become spaces; existing `<br>` tags remain
-  literal source. Single-cell edits preserve the rest of the table's source.
-- **Images load locally.** Markdown images can show local previews; remote images
-  remain source. Clicking an image reveals its Markdown.
-- **Links have source and display ranges.** Labels are shown outside editing;
-  clicking into them reveals the destination. Hover offers link actions;
-  Ctrl-click opens links accepted by the existing URL checks.
-- **Unsupported extensions remain editable source.** Kern does not implement all
-  Zettlr/Pandoc features, such as citation resolution, Mermaid diagrams, or Pandoc
-  div widgets. Rendering never deletes or rewrites those constructs.
-- **kern handles UTF-8 text.** Binary or non-UTF-8 files show a message with an
-  option to open them in the default application for their file type.
-- **There is no autosave.** kern asks before discarding unsaved changes, but a
-  crash loses them.
+- Click formatted text to reveal its Markdown syntax. Copying text includes the Markdown markers.
+- Paragraphs wrap to the window width. Kern preserves source line breaks and indentation when saving.
+- Inline code has a shaded background; code blocks have syntax colouring.
+- Use `$...$` for inline equations and `$$...$$` for display equations. Fractions, matrices, and aligned equations render in place. Click an equation to edit its TeX.
+- HTML stays editable as source. Table cells also edit Markdown; pasted line breaks become spaces.
+- Local images appear in Visual mode. Click an image to edit its Markdown.
+- Hover over a link for actions, or Ctrl-click to open it. Click its label to edit the destination.
+- Save with Ctrl+S. Kern asks before discarding unsaved changes and warns if the file changes on disk.
 
 ## Development
 
